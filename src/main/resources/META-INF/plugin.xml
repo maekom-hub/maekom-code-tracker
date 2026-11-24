@@ -1,0 +1,30 @@
+<idea-plugin>
+    <id>com.maekom.codetracker</id>
+    <name>Maekom Code Tracker</name>
+    <vendor>Maekom Hub</vendor>
+    <description><![CDATA[
+        <p><b>Maekom Code Tracker</b> is a 100% local, offline, read-only code and workflow analysis plugin for IntelliJ IDEA.</p>
+        <p>Built for post-hoc analysis of Spring Boot + GitLab repositories (single and multi-module) utilizing PostgreSQL (JPA/MyBatis), Redis, MongoDB, and external MSA/legacy APIs.</p>
+        <ul>
+            <li>Two-phase on-demand Git commit &amp; unified diff analysis (strictly read-only)</li>
+            <li>Work episode grouping &amp; automatic Markdown (.md) context linking</li>
+            <li>Dual classification: Primary Architecture Layer + Related Tech Stack Tags</li>
+            <li>Smart code location pointers with direct editor navigation &amp; standard Diff viewer</li>
+            <li>5-layer local evidence engine for change rationale ("Why") &amp; architecture check badges</li>
+        </ul>
+    ]]></description>
+
+    <idea-version since-build="242"/>
+
+    <depends>com.intellij.modules.platform</depends>
+    <depends>Git4Idea</depends>
+
+    <extensions defaultExtensionNs="com.intellij">
+        <toolWindow
+            id="Maekom Code Tracker"
+            anchor="right"
+            secondary="false"
+            icon="/icons/codeTracker.svg"
+            factoryClass="com.maekom.codetracker.ui.CodeTrackerToolWindowFactory"/>
+    </extensions>
+</idea-plugin>
