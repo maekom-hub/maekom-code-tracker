@@ -3,6 +3,8 @@ package com.maekom.codetracker.ui
 import com.intellij.diff.DiffContentFactory
 import com.intellij.diff.DiffManager
 import com.intellij.diff.requests.SimpleDiffRequest
+import com.intellij.diff.util.DiffUserDataKeys
+import com.intellij.diff.util.Side
 import com.intellij.openapi.application.ApplicationManager
 import com.intellij.openapi.fileEditor.FileDocumentManager
 import com.intellij.openapi.fileEditor.OpenFileDescriptor
@@ -12,7 +14,9 @@ import com.intellij.openapi.progress.ProgressManager
 import com.intellij.openapi.progress.Task
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.ui.Messages
+import com.intellij.openapi.util.Pair as IntelliJPair
 import com.intellij.openapi.vfs.LocalFileSystem
+import com.intellij.openapi.vfs.VirtualFile
 import com.maekom.codetracker.git.GitRepositoryService
 import com.maekom.codetracker.model.CodeHunkPointer
 import com.maekom.codetracker.model.CommitSummary
@@ -28,6 +32,8 @@ import kotlin.math.abs
  * Strictly read-only, exception-safe, and uses only standard public IntelliJ Platform APIs.
  */
 object CodeNavigator {
+
+    private const val SNIPPET_SEARCH_WINDOW = 50
 
     fun navigateToPointer(
         project: Project,
@@ -49,29 +55,70 @@ object CodeNavigator {
                 Messages.getInformationIcon()
             )
             if (choice == Messages.YES) {
-                showCommitFileDiff(project, repoRootPath, commit, file)
+                showCommitFileDiff(project, repoRootPath, commit, file, pointer)
             }
             return
         }
 
-        val lines = readWorkspaceLines(virtualFile.path, targetPath)
-        val fallbackLine1Based = (pointer?.newStartLine ?: 1).coerceAtLeast(1)
-        val resolvedLine1Based = resolveTargetLine(
-            lines = lines,
-            detectedMethodName = pointer?.detectedMethodName,
-            fallbackLine1Based = fallbackLine1Based
-        )
-
-        val maxLineIndex = (lines.size - 1).coerceAtLeast(0)
-        val zeroBasedLine = (resolvedLine1Based - 1).coerceIn(0, maxLineIndex)
-
+        val zeroBasedLine = resolveTargetLineZeroBased(virtualFile, targetPath, pointer)
         OpenFileDescriptor(project, virtualFile, zeroBasedLine, 0).navigate(true)
     }
 
-    private fun readWorkspaceLines(virtualFilePath: String, nioPath: Path): List<String> {
-        val vf = LocalFileSystem.getInstance().findFileByPath(virtualFilePath)
-        if (vf != null) {
-            val doc = runCatching { FileDocumentManager.getInstance().getCachedDocument(vf) }.getOrNull()
+    internal fun resolveTargetLineZeroBased(
+        virtualFile: VirtualFile?,
+        nioPath: Path,
+        pointer: CodeHunkPointer?
+    ): Int {
+        val lines = readWorkspaceLines(virtualFile, nioPath)
+        val fallbackZeroBased = ((pointer?.newStartLine ?: 1) - 1).coerceAtLeast(0)
+        if (lines.isEmpty()) {
+            return fallbackZeroBased
+        }
+
+        val maxIdx = (lines.size - 1).coerceAtLeast(0)
+        val clampedFallback = fallbackZeroBased.coerceIn(0, maxIdx)
+        if (pointer == null) {
+            return clampedFallback
+        }
+
+        // Priority 1: Search firstChangedCodeLine within +/- 50 lines of (newStartLine - 1)
+        val snippet = pointer.firstChangedCodeLine?.trim()
+        if (!snippet.isNullOrBlank()) {
+            val startIdx = (clampedFallback - SNIPPET_SEARCH_WINDOW).coerceAtLeast(0)
+            val endIdx = (clampedFallback + SNIPPET_SEARCH_WINDOW).coerceAtMost(maxIdx)
+            val exactMatches = mutableListOf<Int>()
+            val containsMatches = mutableListOf<Int>()
+
+            for (idx in startIdx..endIdx) {
+                val candidate = lines[idx].trim()
+                if (candidate == snippet) {
+                    exactMatches.add(idx)
+                } else if (candidate.contains(snippet)) {
+                    containsMatches.add(idx)
+                }
+            }
+
+            exactMatches.minByOrNull { abs(it - clampedFallback) }?.let { return it }
+            containsMatches.minByOrNull { abs(it - clampedFallback) }?.let { return it }
+        }
+
+        // Priority 2: Search closest method declaration matching detectedMethodName
+        val methodLineZeroBased = findClosestMethodLineZeroBased(
+            lines = lines,
+            detectedMethodName = pointer.detectedMethodName,
+            anchorZeroBased = clampedFallback
+        )
+        if (methodLineZeroBased != null) {
+            return methodLineZeroBased.coerceIn(0, maxIdx)
+        }
+
+        // Priority 3: Corrected (newStartLine - 1) fallback
+        return clampedFallback
+    }
+
+    private fun readWorkspaceLines(virtualFile: VirtualFile?, nioPath: Path): List<String> {
+        if (virtualFile != null) {
+            val doc = runCatching { FileDocumentManager.getInstance().getCachedDocument(virtualFile) }.getOrNull()
             if (doc != null) {
                 return doc.text.lines()
             }
@@ -79,25 +126,24 @@ object CodeNavigator {
         return runCatching { Files.readAllLines(nioPath, StandardCharsets.UTF_8) }.getOrDefault(emptyList())
     }
 
-    internal fun resolveTargetLine(
+    private fun findClosestMethodLineZeroBased(
         lines: List<String>,
         detectedMethodName: String?,
-        fallbackLine1Based: Int
-    ): Int {
+        anchorZeroBased: Int
+    ): Int? {
         if (lines.isEmpty() || detectedMethodName.isNullOrBlank()) {
-            return fallbackLine1Based
+            return null
         }
 
         val candidates = mutableListOf<Int>()
         if (detectedMethodName.contains('#')) {
-            // MyBatis XML query id: select#findOrders
             val parts = detectedMethodName.split('#', limit = 2)
             val tag = Regex.escape(parts[0])
             val id = Regex.escape(parts[1])
             val xmlRegex = Regex("""<$tag\b[^>]*\bid\s*=\s*["']$id["']""", RegexOption.IGNORE_CASE)
             lines.forEachIndexed { idx, line ->
                 if (xmlRegex.containsMatchIn(line)) {
-                    candidates.add(idx + 1)
+                    candidates.add(idx)
                 }
             }
         } else {
@@ -106,24 +152,20 @@ object CodeNavigator {
             lines.forEachIndexed { idx, line ->
                 val trimmed = line.trim()
                 if (!trimmed.startsWith("//") && !trimmed.startsWith("*") && methodDeclRegex.containsMatchIn(trimmed)) {
-                    candidates.add(idx + 1)
+                    candidates.add(idx)
                 }
             }
         }
 
-        if (candidates.isEmpty()) {
-            return fallbackLine1Based
-        }
-
-        // Prefer the matching declaration closest to the hunk's newStartLine
-        return candidates.minByOrNull { abs(it - fallbackLine1Based) } ?: fallbackLine1Based
+        return candidates.minByOrNull { abs(it - anchorZeroBased) }
     }
 
     fun showCommitFileDiff(
         project: Project,
         repoRootPath: String,
         commit: CommitSummary,
-        file: FileSummary
+        file: FileSummary,
+        targetPointer: CodeHunkPointer? = null
     ) {
         ProgressManager.getInstance().run(object : Task.Backgroundable(
             project,
@@ -170,6 +212,12 @@ object CodeNavigator {
                         beforeLabel,
                         afterLabel
                     )
+                    if (targetPointer != null) {
+                        request.putUserData(
+                            DiffUserDataKeys.SCROLL_TO_LINE,
+                            IntelliJPair.create(Side.RIGHT, (targetPointer.newStartLine - 1).coerceAtLeast(0))
+                        )
+                    }
                     DiffManager.getInstance().showDiff(project, request)
                 }
             }

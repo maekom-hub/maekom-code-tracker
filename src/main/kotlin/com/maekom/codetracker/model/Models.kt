@@ -199,6 +199,7 @@ data class CodeHunkPointer(
     val displayContext: String,
     val addedLines: Int,
     val deletedLines: Int,
+    val firstChangedCodeLine: String? = null,
     val matchedMdShortNote: String? = null,
     val matchedMdFullNote: String? = null
 )

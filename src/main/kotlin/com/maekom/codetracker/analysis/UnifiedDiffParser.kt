@@ -200,7 +200,10 @@ object UnifiedDiffParser {
         var currentNewStart = 1
         var currentNewCount = 0
         var currentHeaderContext = ""
-        var currentNewLineCursor = 1
+        var runningNewLine = 1
+        var firstNonBlankChangedLine: Int? = null
+        var firstAnyChangedLine: Int? = null
+        var firstChangedCodeLine: String? = null
         var hunkAdded = 0
         var hunkDeleted = 0
         var hunkDetectedMethod: String? = null
@@ -229,10 +232,11 @@ object UnifiedDiffParser {
                 !bestMethod.isNullOrBlank() -> bestMethod
                 else -> "변경 블록"
             }
+            val effectiveNewStartLine = (firstNonBlankChangedLine ?: firstAnyChangedLine ?: currentNewStart).coerceAtLeast(1)
             hunks.add(
                 CodeHunkPointer(
                     filePath = summary.path,
-                    newStartLine = currentNewStart.coerceAtLeast(1),
+                    newStartLine = effectiveNewStartLine,
                     newLineCount = currentNewCount,
                     oldStartLine = currentOldStart.coerceAtLeast(1),
                     oldLineCount = currentOldCount,
@@ -240,7 +244,8 @@ object UnifiedDiffParser {
                     detectedMethodName = bestMethod,
                     displayContext = displayContext.take(120),
                     addedLines = hunkAdded,
-                    deletedLines = hunkDeleted
+                    deletedLines = hunkDeleted,
+                    firstChangedCodeLine = firstChangedCodeLine
                 )
             )
         }
@@ -255,7 +260,10 @@ object UnifiedDiffParser {
                 currentNewStart = hunkMatch.groupValues[3].toIntOrNull() ?: 1
                 currentNewCount = hunkMatch.groupValues[4].toIntOrNull() ?: 1
                 currentHeaderContext = hunkMatch.groupValues[5].trim()
-                currentNewLineCursor = currentNewStart.coerceAtLeast(1)
+                runningNewLine = currentNewStart
+                firstNonBlankChangedLine = null
+                firstAnyChangedLine = null
+                firstChangedCodeLine = null
                 hunkAdded = 0
                 hunkDeleted = 0
                 hunkDetectedMethod = null
@@ -270,13 +278,31 @@ object UnifiedDiffParser {
 
             when {
                 line.startsWith("+") && !line.startsWith("+++") -> {
-                    val code = line.substring(1)
+                    val content = line.substring(1)
+                    val trimmed = content.trim()
                     hunkAdded++
                     addedTotal++
-                    hunkChangedLines.add(code)
+                    hunkChangedLines.add(content)
 
-                    val isSubstantive = isSubstantiveCodeLine(code)
-                    val activeCode = if (isSubstantive) stripInlineComment(code) else ""
+                    if (firstAnyChangedLine == null) {
+                        firstAnyChangedLine = runningNewLine
+                    }
+                    if (content.isNotBlank() && firstNonBlankChangedLine == null) {
+                        firstNonBlankChangedLine = runningNewLine
+                    }
+                    if (firstChangedCodeLine == null &&
+                        trimmed.length >= 6 &&
+                        !trimmed.startsWith("//") &&
+                        !trimmed.startsWith("/*") &&
+                        !trimmed.startsWith("*") &&
+                        !trimmed.startsWith("import ") &&
+                        !trimmed.startsWith("package ")
+                    ) {
+                        firstChangedCodeLine = trimmed
+                    }
+
+                    val isSubstantive = isSubstantiveCodeLine(content)
+                    val activeCode = if (isSubstantive) stripInlineComment(content) else ""
 
                     if (isSubstantive) {
                         substantiveAddedLines.append(activeCode).append('\n')
@@ -290,12 +316,12 @@ object UnifiedDiffParser {
                         val methodName = extractMethodName(activeCode)
                         if (methodName != null) {
                             hunkDetectedMethod = methodName
-                            hunkSignatureText = code.trim()
+                            hunkSignatureText = trimmed
                         }
                     }
 
                     // Extract newly added comments
-                    extractCommentText(code)?.let { comment ->
+                    extractCommentText(content)?.let { comment ->
                         if (addedComments.size < 20) {
                             addedComments.add(comment)
                         }
@@ -303,24 +329,33 @@ object UnifiedDiffParser {
 
                     // Extract API endpoints / External URIs from substantive code lines
                     if (isSubstantive && isApiCandidateLine(summary, activeCode)) {
-                        extractApiHints(summary, activeCode, currentNewLineCursor, apiHints)
+                        extractApiHints(summary, activeCode, runningNewLine, apiHints)
                     }
 
-                    currentNewLineCursor++
+                    runningNewLine++
                 }
 
                 line.startsWith("-") && !line.startsWith("---") -> {
-                    val code = line.substring(1)
+                    val content = line.substring(1)
                     hunkDeleted++
                     deletedTotal++
-                    hunkChangedLines.add(code)
-                    if (isSubstantiveCodeLine(code) && stripInlineComment(code).contains("@Transactional")) {
+                    hunkChangedLines.add(content)
+
+                    if (firstAnyChangedLine == null) {
+                        firstAnyChangedLine = runningNewLine
+                    }
+                    if (content.isNotBlank() && firstNonBlankChangedLine == null) {
+                        firstNonBlankChangedLine = runningNewLine
+                    }
+
+                    if (isSubstantiveCodeLine(content) && stripInlineComment(content).contains("@Transactional")) {
                         hasTransactionalChange = true
                     }
+                    // Deleted line does not exist in the new file -> do NOT increment runningNewLine
                 }
 
                 line.startsWith(" ") -> {
-                    currentNewLineCursor++
+                    runningNewLine++
                 }
             }
         }

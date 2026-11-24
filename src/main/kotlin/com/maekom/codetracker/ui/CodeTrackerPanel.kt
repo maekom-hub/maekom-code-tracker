@@ -448,7 +448,7 @@ class CodeTrackerPanel(private val project: Project) : JBPanel<CodeTrackerPanel>
 
         val popup = JPopupMenu()
         popup.add(JMenuItem("Before / After Diff 비교").apply {
-            addActionListener { openDiff(fileDetail) }
+            addActionListener { openDiff(fileDetail, pointer) }
         })
         popup.add(JMenuItem("워크스페이스 코드 위치로 이동").apply {
             addActionListener { navigateToFileOrHunk(fileDetail, pointer) }
@@ -876,27 +876,31 @@ class CodeTrackerPanel(private val project: Project) : JBPanel<CodeTrackerPanel>
 
     private fun openDiffForSelectedPointerNode() {
         val node = pointerTree.lastSelectedPathComponent as? DefaultMutableTreeNode
-        val fileDetail = when (val obj = node?.userObject) {
-            is FileNodeData -> obj.fileDetail
-            is HunkNodeData -> obj.fileDetail
-            is PointerMdNoteNodeData -> obj.fileDetail
-            else -> selectedDetail?.fileDetails?.firstOrNull()
+        val (fileDetail, pointer) = when (val obj = node?.userObject) {
+            is FileNodeData -> obj.fileDetail to obj.fileDetail.hunks.firstOrNull()
+            is HunkNodeData -> obj.fileDetail to obj.pointer
+            is PointerMdNoteNodeData -> obj.fileDetail to obj.pointer
+            else -> {
+                val first = selectedDetail?.fileDetails?.firstOrNull()
+                first to first?.hunks?.firstOrNull()
+            }
         }
         if (fileDetail == null) {
             Messages.showInfoMessage(project, "Diff를 비교할 파일을 먼저 선택해 주세요.", "Maekom Code Tracker")
             return
         }
-        openDiff(fileDetail)
+        openDiff(fileDetail, pointer)
     }
 
-    private fun openDiff(fileDetail: FileDiffDetail) {
+    private fun openDiff(fileDetail: FileDiffDetail, targetPointer: CodeHunkPointer? = null) {
         val result = currentResult ?: return
         val commit = selectedCommit ?: return
         CodeNavigator.showCommitFileDiff(
             project = project,
             repoRootPath = result.filter.repo.rootPath,
             commit = commit,
-            file = fileDetail.summary
+            file = fileDetail.summary,
+            targetPointer = targetPointer
         )
     }
 
