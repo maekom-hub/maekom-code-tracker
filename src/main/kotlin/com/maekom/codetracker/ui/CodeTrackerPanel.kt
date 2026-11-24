@@ -49,6 +49,7 @@ import com.maekom.codetracker.model.MergedFileAnalysisDetail
 import com.maekom.codetracker.model.PrimaryLayer
 import com.maekom.codetracker.model.RadarSeverity
 import com.maekom.codetracker.model.RepoOption
+import com.maekom.codetracker.model.SideEffectAlert
 import com.maekom.codetracker.model.StackTag
 import com.maekom.codetracker.model.WorkEpisode
 import com.maekom.codetracker.update.PluginUpdateChecker
@@ -56,6 +57,7 @@ import com.maekom.codetracker.update.UpdateCheckResult
 import java.awt.BorderLayout
 import java.awt.CardLayout
 import java.awt.Color
+import java.awt.Component
 import java.awt.Dimension
 import java.awt.FlowLayout
 import java.awt.datatransfer.StringSelection
@@ -178,10 +180,15 @@ class CodeTrackerPanel(
     private val flowModel = DefaultTreeModel(flowRoot)
     private val flowTree = Tree(flowModel)
 
-    // Right Top Panel: Entrypoints line-by-line section + Rationale & Architecture Check
-    private val entrypointsPanel = EntrypointsSectionPanel(project)
+    // Right Top Panel: Single unified JBScrollPane containing Block 1 (Entrypoints) + Block 2 (Side-Effect Radar) + Block 3 (Commit Rationale)
+    private lateinit var outerDetailScrollPane: JBScrollPane
+    private val entrypointsPanel = EntrypointsSectionPanel(project) {
+        if (::outerDetailScrollPane.isInitialized) outerDetailScrollPane else null
+    }
+    private val sideEffectRadarPanel = SideEffectRadarPanel { alert -> navigateToRadarAlert(alert) }
     private val rationalePane = JEditorPane().apply {
         isEditable = false
+        alignmentX = Component.LEFT_ALIGNMENT
         font = UIManager.getFont("Tree.font") ?: JBUI.Fonts.label()
         editorKit = HTMLEditorKit()
         putClientProperty(JEditorPane.HONOR_DISPLAY_PROPERTIES, true)
@@ -362,6 +369,7 @@ class CodeTrackerPanel(
         flowTree.revalidate()
         flowTree.repaint()
         entrypointsPanel.refreshLocalization()
+        sideEffectRadarPanel.refreshLocalization()
 
         val merged = selectedMergedDetail
         val detail = selectedDetail
@@ -413,15 +421,26 @@ class CodeTrackerPanel(
             }
         })
 
-        // Right vertical splitter: Rationale (Top: Entrypoints + Rationale HTML) + Smart Pointers (Bottom)
-        val rightTopContent = JPanel(BorderLayout()).apply {
-            add(entrypointsPanel, BorderLayout.NORTH)
-            add(JBScrollPane(rationalePane), BorderLayout.CENTER)
+        // Right vertical splitter: Single unified ScrollableDetailContainer inside one JBScrollPane
+        val rationaleWrapper = JPanel(BorderLayout()).apply {
+            alignmentX = Component.LEFT_ALIGNMENT
+            isOpaque = false
+            add(rationalePane, BorderLayout.CENTER)
+        }
+        val detailContentPanel = ScrollableDetailContainer().apply {
+            add(entrypointsPanel)
+            add(sideEffectRadarPanel)
+            add(rationaleWrapper)
+        }
+        outerDetailScrollPane = JBScrollPane(detailContentPanel).apply {
+            border = JBUI.Borders.empty()
+            horizontalScrollBarPolicy = javax.swing.ScrollPaneConstants.HORIZONTAL_SCROLLBAR_NEVER
+            verticalScrollBarPolicy = javax.swing.ScrollPaneConstants.VERTICAL_SCROLLBAR_AS_NEEDED
         }
         val rightTopPanel = JPanel(BorderLayout()).apply {
             border = JBUI.Borders.customLine(JBColor.border(), 1)
             add(rightTopHeaderLabel, BorderLayout.NORTH)
-            add(rightTopContent, BorderLayout.CENTER)
+            add(outerDetailScrollPane, BorderLayout.CENTER)
         }
 
         val rightBottomPanel = JPanel(BorderLayout()).apply {
@@ -682,22 +701,37 @@ class CodeTrackerPanel(
                 val alert = merged?.sideEffectAlerts?.getOrNull(idx)
                     ?: detail?.sideEffectAlerts?.getOrNull(idx)
                     ?: return
-                val commit = merged?.commitSections?.firstOrNull { it.commit.hash == alert.commitHash }?.commit
-                    ?: merged?.commitSections?.firstOrNull()?.commit
-                    ?: selectedCommit
-                    ?: return
-                val fileSummary = detail?.fileDetails?.firstOrNull { it.summary.path == alert.filePath }?.summary
-                    ?: merged?.commitSections?.firstOrNull { it.fileDetail.summary.path == alert.filePath }?.fileDetail?.summary
-                    ?: commit.files.firstOrNull { it.path == alert.filePath }
-                    ?: return
-                CodeNavigator.navigateToPointer(
-                    project = project,
-                    repoRootPath = repoRoot,
-                    commit = commit,
-                    file = fileSummary,
-                    pointer = alert.hunkPointer
-                )
+                navigateToRadarAlert(alert)
             }
+        }
+    }
+
+    private fun navigateToRadarAlert(alert: SideEffectAlert) {
+        val result = currentResult ?: return
+        val repoRoot = result.filter.repo.rootPath
+        val merged = selectedMergedDetail
+        val detail = selectedDetail
+        val commit = merged?.commitSections?.firstOrNull { it.commit.hash == alert.commitHash }?.commit
+            ?: merged?.commitSections?.firstOrNull()?.commit
+            ?: selectedCommit
+            ?: return
+        val fileSummary = detail?.fileDetails?.firstOrNull { it.summary.path == alert.filePath }?.summary
+            ?: merged?.commitSections?.firstOrNull { it.fileDetail.summary.path == alert.filePath }?.fileDetail?.summary
+            ?: commit.files.firstOrNull { it.path == alert.filePath }
+            ?: return
+        CodeNavigator.navigateToPointer(
+            project = project,
+            repoRootPath = repoRoot,
+            commit = commit,
+            file = fileSummary,
+            pointer = alert.hunkPointer
+        )
+    }
+
+    private fun resetDetailScrollToTop() {
+        if (!::outerDetailScrollPane.isInitialized) return
+        SwingUtilities.invokeLater {
+            outerDetailScrollPane.verticalScrollBar.value = 0
         }
     }
 
@@ -1108,6 +1142,7 @@ class CodeTrackerPanel(
 
                         applyClientSideFilter()
                         entrypointsPanel.clear()
+                        sideEffectRadarPanel.clear()
                         rationalePane.text = RationaleHtmlRenderer.renderPlaceholder(
                             if (rawCommits.isEmpty()) {
                                 CodeTrackerI18n.rationaleNoCommitsPlaceholder()
@@ -1202,10 +1237,12 @@ class CodeTrackerPanel(
         selectedDetail = null
         selectedMergedDetail = null
         entrypointsPanel.clear()
+        sideEffectRadarPanel.clear()
         rationalePane.text = RationaleHtmlRenderer.renderPlaceholder(
             CodeTrackerI18n.flowLoadingMergedFile(mergedFile.fileName, mergedFile.commits.size)
         )
         rationalePane.caretPosition = 0
+        resetDetailScrollToTop()
         clearPointerTree()
 
         ApplicationManager.getApplication().executeOnPooledThread {
@@ -1232,8 +1269,10 @@ class CodeTrackerPanel(
         selectedMergedDetail = merged
         selectedCommit = merged.commitSections.firstOrNull()?.commit
         entrypointsPanel.updateTrace(merged.entrypointTrace)
+        sideEffectRadarPanel.updateAlerts(merged.sideEffectAlerts)
         rationalePane.text = RationaleHtmlRenderer.renderMergedFileDetail(merged)
         rationalePane.caretPosition = 0
+        resetDetailScrollToTop()
         rebuildPointerTreeForMergedFile(merged)
     }
 
@@ -1387,8 +1426,10 @@ class CodeTrackerPanel(
         }
 
         entrypointsPanel.clear()
+        sideEffectRadarPanel.clear()
         rationalePane.text = RationaleHtmlRenderer.renderLoading(commit)
         rationalePane.caretPosition = 0
+        resetDetailScrollToTop()
         clearPointerTree()
 
         ProgressManager.getInstance().run(object : Task.Backgroundable(
@@ -1438,8 +1479,10 @@ class CodeTrackerPanel(
         selectedMergedDetail = null
         selectedDetail = detail
         entrypointsPanel.updateTrace(detail.entrypointTrace)
+        sideEffectRadarPanel.updateAlerts(detail.sideEffectAlerts)
         rationalePane.text = RationaleHtmlRenderer.renderCommitDetail(detail)
         rationalePane.caretPosition = 0
+        resetDetailScrollToTop()
         rebuildPointerTree(detail)
     }
 

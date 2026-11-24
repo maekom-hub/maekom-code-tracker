@@ -11,6 +11,7 @@ import com.maekom.codetracker.model.EntrypointTarget
 import com.maekom.codetracker.model.EntrypointTraceResult
 import java.awt.BorderLayout
 import java.awt.Color
+import java.awt.Component
 import java.awt.Cursor
 import java.awt.Dimension
 import java.awt.Font
@@ -18,28 +19,35 @@ import java.awt.event.MouseAdapter
 import java.awt.event.MouseEvent
 import javax.swing.BoxLayout
 import javax.swing.JPanel
+import javax.swing.JScrollPane
 import javax.swing.ScrollPaneConstants
 import javax.swing.SwingUtilities
 import javax.swing.UIManager
 
 /**
- * Native Swing line-by-line Impacted Entrypoints section panel.
- * Renders 1 dedicated row per entrypoint:
- * - Left: `[API] POST /api/v1/...` (or Batch/Scheduler/Event entrypoint)
- * - Right: Concise impact reason with native JLabel ellipsis (`...`) on narrow panels
- * - Hover tooltip: Full call chain (`Controller -> Service -> Repository`) + full impact reason
- * - Click anywhere on row: Jumps immediately to the entrypoint source file & method
+ * Native Swing line-by-line Impacted Entrypoints card placed inside the unified detail scroll pane.
+ * - 1..4 items: exact content height, inner vertical scrollbar hidden, wheel always bubbles to outer scroll pane.
+ * - 5+ items: fixed 4-row height with inner vertical scrollbar, wheel bubbles to outer scroll pane at top/bottom edges.
+ * - 0 items (and not DumbMode): completely hidden (`isVisible = false`) with zero empty space.
  */
-class EntrypointsSectionPanel(private val project: Project) : JPanel(BorderLayout()) {
+class EntrypointsSectionPanel(
+    private val project: Project,
+    private val outerScrollPaneProvider: () -> JScrollPane? = { null }
+) : JPanel(BorderLayout()) {
+
+    companion object {
+        private const val MAX_VISIBLE_ROWS = 4
+    }
 
     private var currentTrace: EntrypointTraceResult? = null
+    private var currentEntrypointCount: Int = 0
 
     private val titleLabel = JBLabel().apply {
         font = (UIManager.getFont("Tree.font") ?: JBUI.Fonts.label()).let {
             it.deriveFont(Font.BOLD, (it.size2D - 1f).coerceAtLeast(11f))
         }
         foreground = UIUtil.getContextHelpForeground()
-        border = JBUI.Borders.empty(3, 6, 2, 6)
+        border = JBUI.Borders.empty(4, 6, 2, 6)
     }
 
     private val rowsContainer = JPanel().apply {
@@ -50,17 +58,39 @@ class EntrypointsSectionPanel(private val project: Project) : JPanel(BorderLayou
     private val scrollPane = JBScrollPane(rowsContainer).apply {
         border = JBUI.Borders.empty()
         horizontalScrollBarPolicy = ScrollPaneConstants.HORIZONTAL_SCROLLBAR_NEVER
-        verticalScrollBarPolicy = ScrollPaneConstants.VERTICAL_SCROLLBAR_AS_NEEDED
+        verticalScrollBarPolicy = ScrollPaneConstants.VERTICAL_SCROLLBAR_NEVER
         isOpaque = false
         viewport.isOpaque = false
     }
 
     init {
+        alignmentX = Component.LEFT_ALIGNMENT
         isVisible = false
         border = JBUI.Borders.customLine(JBColor.border(), 0, 0, 1, 0)
         background = JBColor(Color(0xF7F9FC), Color(0x282A2E))
         add(titleLabel, BorderLayout.NORTH)
         add(scrollPane, BorderLayout.CENTER)
+
+        // Bubble mouse wheel events seamlessly to the outer unified detail scroll pane
+        scrollPane.addMouseWheelListener { e ->
+            val outer = outerScrollPaneProvider() ?: return@addMouseWheelListener
+            val bar = scrollPane.verticalScrollBar
+            val atTop = bar.value <= bar.minimum
+            val atBottom = bar.value + bar.visibleAmount >= bar.maximum
+            val shouldBubble = currentEntrypointCount <= MAX_VISIBLE_ROWS ||
+                (e.wheelRotation < 0 && atTop) ||
+                (e.wheelRotation > 0 && atBottom)
+            if (shouldBubble) {
+                val converted = SwingUtilities.convertMouseEvent(scrollPane, e, outer)
+                outer.dispatchEvent(converted)
+                e.consume()
+            }
+        }
+    }
+
+    override fun getMaximumSize(): Dimension {
+        val pref = preferredSize
+        return Dimension(Int.MAX_VALUE, pref.height)
     }
 
     fun updateTrace(trace: EntrypointTraceResult?) {
@@ -70,6 +100,7 @@ class EntrypointsSectionPanel(private val project: Project) : JPanel(BorderLayou
 
     fun clear() {
         currentTrace = null
+        currentEntrypointCount = 0
         rowsContainer.removeAll()
         isVisible = false
         revalidate()
@@ -85,6 +116,7 @@ class EntrypointsSectionPanel(private val project: Project) : JPanel(BorderLayou
         rowsContainer.removeAll()
 
         if (trace == null || (!trace.isDumbMode && trace.entrypoints.isEmpty())) {
+            currentEntrypointCount = 0
             isVisible = false
             revalidate()
             repaint()
@@ -101,23 +133,47 @@ class EntrypointsSectionPanel(private val project: Project) : JPanel(BorderLayou
         val baseFont = UIManager.getFont("Tree.font") ?: JBUI.Fonts.label()
         val rowFont = baseFont.deriveFont(Font.PLAIN, baseFont.size2D.coerceAtMost(12f))
         val badgeFont = rowFont.deriveFont(Font.BOLD)
+        val rowHeight = JBUI.scale(24)
+        val verticalPadding = JBUI.scale(4)
 
+        val scrollHeight: Int
         if (trace.isDumbMode) {
+            currentEntrypointCount = 0
             val notice = JBLabel(CodeTrackerI18n.entrypointDumbModeNotice()).apply {
                 font = rowFont
                 foreground = UIUtil.getContextHelpForeground()
                 border = JBUI.Borders.empty(2, 8, 5, 8)
+                alignmentX = Component.LEFT_ALIGNMENT
             }
             rowsContainer.add(notice)
-            scrollPane.preferredSize = Dimension(0, JBUI.scale(26))
+            scrollPane.verticalScrollBarPolicy = ScrollPaneConstants.VERTICAL_SCROLLBAR_NEVER
+            scrollHeight = JBUI.scale(26)
         } else {
-            val rowHeight = JBUI.scale(23)
+            currentEntrypointCount = trace.entrypoints.size
             for ((idx, ep) in trace.entrypoints.withIndex()) {
                 val isLast = idx == trace.entrypoints.lastIndex
-                rowsContainer.add(createEntrypointRow(ep, badgeFont, rowFont, isLast))
+                rowsContainer.add(createEntrypointRow(ep, badgeFont, rowFont, rowHeight, isLast))
             }
-            val visibleRows = trace.entrypoints.size.coerceAtMost(5)
-            scrollPane.preferredSize = Dimension(0, visibleRows * rowHeight + JBUI.scale(4))
+            if (currentEntrypointCount <= MAX_VISIBLE_ROWS) {
+                scrollPane.verticalScrollBarPolicy = ScrollPaneConstants.VERTICAL_SCROLLBAR_NEVER
+                scrollHeight = currentEntrypointCount * rowHeight + verticalPadding
+            } else {
+                scrollPane.verticalScrollBarPolicy = ScrollPaneConstants.VERTICAL_SCROLLBAR_AS_NEEDED
+                scrollHeight = MAX_VISIBLE_ROWS * rowHeight + verticalPadding
+            }
+        }
+
+        scrollPane.preferredSize = Dimension(0, scrollHeight)
+        scrollPane.minimumSize = Dimension(0, scrollHeight)
+        scrollPane.maximumSize = Dimension(Int.MAX_VALUE, scrollHeight)
+
+        val totalHeight = titleLabel.preferredSize.height + scrollHeight + JBUI.scale(2)
+        preferredSize = Dimension(0, totalHeight)
+        minimumSize = Dimension(0, totalHeight)
+        maximumSize = Dimension(Int.MAX_VALUE, totalHeight)
+
+        SwingUtilities.invokeLater {
+            scrollPane.verticalScrollBar.value = 0
         }
 
         isVisible = true
@@ -129,6 +185,7 @@ class EntrypointsSectionPanel(private val project: Project) : JPanel(BorderLayou
         ep: EntrypointTarget,
         badgeFont: Font,
         reasonFont: Font,
+        rowHeight: Int,
         isLast: Boolean
     ): JPanel {
         val defaultBg = JBColor(Color(0xF7F9FC), Color(0x282A2E))
@@ -150,16 +207,15 @@ class EntrypointsSectionPanel(private val project: Project) : JPanel(BorderLayou
             foreground = reasonColor
             toolTipText = tooltipHtml
             cursor = Cursor.getPredefinedCursor(Cursor.HAND_CURSOR)
-            // Allow Swing JLabel to shrink cleanly and show native '...' ellipsis on narrow tool windows
-            minimumSize = Dimension(0, preferredSize.height)
+            minimumSize = Dimension(0, rowHeight - JBUI.scale(4))
         }
 
         val row = object : JPanel(BorderLayout(8, 0)) {
-            override fun getMaximumSize(): Dimension {
-                val pref = preferredSize
-                return Dimension(Int.MAX_VALUE, pref.height.coerceAtLeast(JBUI.scale(22)))
-            }
+            override fun getPreferredSize(): Dimension = Dimension(super.getPreferredSize().width, rowHeight)
+            override fun getMinimumSize(): Dimension = Dimension(0, rowHeight)
+            override fun getMaximumSize(): Dimension = Dimension(Int.MAX_VALUE, rowHeight)
         }.apply {
+            alignmentX = Component.LEFT_ALIGNMENT
             isOpaque = true
             background = defaultBg
             border = JBUI.Borders.compound(

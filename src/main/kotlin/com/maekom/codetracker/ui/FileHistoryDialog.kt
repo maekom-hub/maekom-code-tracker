@@ -29,6 +29,7 @@ import com.maekom.codetracker.model.FileHistoryVersionGroup
 import com.maekom.codetracker.model.RadarSeverity
 import java.awt.BorderLayout
 import java.awt.Color
+import java.awt.Component
 import java.awt.FlowLayout
 import java.awt.Font
 import java.awt.event.KeyAdapter
@@ -156,10 +157,15 @@ class FileHistoryDialog private constructor(
     private val historyTree = Tree(historyModel)
     private lateinit var leftLoadingPanel: JBLoadingPanel
 
-    // Right Top: Entrypoints line-by-line panel + compact rationale panel
-    private val entrypointsPanel = EntrypointsSectionPanel(project)
+    // Right Top: Single unified JBScrollPane (Entrypoints + Side-Effect Radar + Rationale)
+    private lateinit var outerDetailScrollPane: JBScrollPane
+    private val entrypointsPanel = EntrypointsSectionPanel(project) {
+        if (::outerDetailScrollPane.isInitialized) outerDetailScrollPane else null
+    }
+    private val sideEffectRadarPanel = SideEffectRadarPanel { alert -> navigateToWorkspacePointer(alert.hunkPointer) }
     private val rationalePane = JEditorPane().apply {
         isEditable = false
+        alignmentX = Component.LEFT_ALIGNMENT
         font = UIManager.getFont("Tree.font") ?: JBUI.Fonts.label()
         editorKit = HTMLEditorKit()
         putClientProperty(JEditorPane.HONOR_DISPLAY_PROPERTIES, true)
@@ -243,7 +249,9 @@ class FileHistoryDialog private constructor(
         historyTree.emptyText.text = ""
 
         entrypointsPanel.clear()
+        sideEffectRadarPanel.clear()
         rationalePane.text = RationaleHtmlRenderer.renderPlaceholder(CodeTrackerI18n.fileHistorySelectCommitHint())
+        resetDetailScrollToTop()
         pointerRoot.removeAllChildren()
         pointerModel.reload()
         if (::rightLoadingPanel.isInitialized) {
@@ -294,15 +302,26 @@ class FileHistoryDialog private constructor(
             add(leftLoadingPanel, BorderLayout.CENTER)
         }
 
-        // Right Top: Header + Line-by-line Impacted Entrypoints + Rationale HTML ScrollPane
-        val rightTopContent = JPanel(BorderLayout()).apply {
-            add(entrypointsPanel, BorderLayout.NORTH)
-            add(JBScrollPane(rationalePane), BorderLayout.CENTER)
+        // Right Top: Single unified ScrollableDetailContainer inside one JBScrollPane
+        val rationaleWrapper = JPanel(BorderLayout()).apply {
+            alignmentX = Component.LEFT_ALIGNMENT
+            isOpaque = false
+            add(rationalePane, BorderLayout.CENTER)
+        }
+        val detailContentPanel = ScrollableDetailContainer().apply {
+            add(entrypointsPanel)
+            add(sideEffectRadarPanel)
+            add(rationaleWrapper)
+        }
+        outerDetailScrollPane = JBScrollPane(detailContentPanel).apply {
+            border = JBUI.Borders.empty()
+            horizontalScrollBarPolicy = javax.swing.ScrollPaneConstants.HORIZONTAL_SCROLLBAR_NEVER
+            verticalScrollBarPolicy = javax.swing.ScrollPaneConstants.VERTICAL_SCROLLBAR_AS_NEEDED
         }
         val rightTopPanel = JPanel(BorderLayout()).apply {
             border = JBUI.Borders.customLine(JBColor.border(), 1)
             add(rightTopHeaderLabel, BorderLayout.NORTH)
-            add(rightTopContent, BorderLayout.CENTER)
+            add(outerDetailScrollPane, BorderLayout.CENTER)
         }
 
         // Right Bottom: Smart Pointers inside JBLoadingPanel
@@ -346,6 +365,7 @@ class FileHistoryDialog private constructor(
         openDiffButton.toolTipText = CodeTrackerI18n.menuPointerDiff()
         pointerTree.emptyText.text = CodeTrackerI18n.fileHistorySelectCommitHint()
         entrypointsPanel.refreshLocalization()
+        sideEffectRadarPanel.refreshLocalization()
 
         if (::leftLoadingPanel.isInitialized) {
             leftLoadingPanel.setLoadingText(CodeTrackerI18n.fileHistoryLoadingLeftText())
@@ -714,11 +734,20 @@ class FileHistoryDialog private constructor(
         }
     }
 
+    private fun resetDetailScrollToTop() {
+        if (!::outerDetailScrollPane.isInitialized) return
+        SwingUtilities.invokeLater {
+            outerDetailScrollPane.verticalScrollBar.value = 0
+        }
+    }
+
     private fun displayEntryDetail(detail: CommitDetail) {
         selectedDetail = detail
         entrypointsPanel.updateTrace(detail.entrypointTrace)
+        sideEffectRadarPanel.updateAlerts(detail.sideEffectAlerts)
         rationalePane.text = RationaleHtmlRenderer.renderCommitDetail(detail)
         rationalePane.caretPosition = 0
+        resetDetailScrollToTop()
 
         pointerRoot.removeAllChildren()
         for (fd in detail.fileDetails) {

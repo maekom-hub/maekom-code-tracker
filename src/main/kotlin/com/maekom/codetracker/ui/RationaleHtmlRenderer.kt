@@ -107,9 +107,6 @@ object RationaleHtmlRenderer {
             }
             append("</div>")
 
-            // Top Section: Backend Side-Effect Risk Radar (clickable jump to exact hunk line)
-            appendSideEffectRadarSection(detail.sideEffectAlerts, fg, muted)
-
             // Cross-layer flow summary
             append("<div style=\"background-color: $flowBg; border-left: 3px solid $accentBlue; padding: 3px 6px; margin-bottom: 5px;\">")
             append("<b>${escapeHtml(localizedFlowSummary)}</b>")
@@ -227,8 +224,6 @@ object RationaleHtmlRenderer {
                 append(" &nbsp;&raquo;&nbsp; ${escapeHtml(merged.allStackTags.joinToString(", ") { it.label })}")
             }
             append("</div>")
-
-            appendSideEffectRadarSection(merged.sideEffectAlerts, fg, muted)
 
             // Related commits timeline for this merged file
             append("<div style=\"margin-bottom: 5px;\">")
