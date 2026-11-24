@@ -35,34 +35,42 @@ object RationaleAndCheckEngine {
         // 1. Issue tags from commit body & subject
         val issueTags = extractIssueTags("${commit.subject}\n${commit.body}")
 
-        // 2. Matched Markdown context from same or immediately preceding episode
+        // 2. Load available .md sections from same / immediately preceding episode,
+        //    match commit-level context AND attach precision Hunk-level .md notes
         val (currentEp, prevEp) = EpisodeGrouper.findEpisodeAndPrevious(allEpisodes, commit.hash)
-        val matchedMd = MarkdownContextMatcher.matchContextForCommit(
+        val loadedMdSections = MarkdownContextMatcher.loadAvailableMarkdownSections(
             project = project,
             repoRootPath = repoRootPath,
-            commit = commit,
-            fileDetails = fileDetails,
             currentEpisode = currentEp,
             previousEpisode = prevEp
         )
+        val matchedMd = MarkdownContextMatcher.matchContextForCommit(
+            commit = commit,
+            fileDetails = fileDetails,
+            loadedSections = loadedMdSections
+        )
+        val enrichedFileDetails = MarkdownContextMatcher.attachHunkMarkdownNotes(
+            fileDetails = fileDetails,
+            loadedSections = loadedMdSections
+        )
 
         // 3. Collect newly added comments & API hints
-        val addedComments = fileDetails.flatMap { fd ->
+        val addedComments = enrichedFileDetails.flatMap { fd ->
             fd.addedComments.map { comment -> fd.summary.fileName to comment }
         }.take(30)
 
-        val apiHints = fileDetails.flatMap { it.apiHints }
-        val allStackTags = fileDetails.flatMap { it.stackTags }.toCollection(linkedSetOf())
+        val apiHints = enrichedFileDetails.flatMap { it.apiHints }
+        val allStackTags = enrichedFileDetails.flatMap { it.stackTags }.toCollection(linkedSetOf())
 
         // 4. Detect architecture check badges
-        val badges = detectCheckBadges(fileDetails, allStackTags)
+        val badges = detectCheckBadges(enrichedFileDetails, allStackTags)
 
         // 5. Build 1-line cross-layer flow summary
-        val flowSummary = buildCrossLayerFlowSummary(commit, fileDetails, allStackTags)
+        val flowSummary = buildCrossLayerFlowSummary(commit, enrichedFileDetails, allStackTags)
 
         return CommitDetail(
             summary = commit,
-            fileDetails = fileDetails,
+            fileDetails = enrichedFileDetails,
             issueTags = issueTags,
             allStackTags = allStackTags,
             checkBadges = badges,

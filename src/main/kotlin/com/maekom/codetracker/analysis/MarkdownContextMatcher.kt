@@ -2,6 +2,7 @@ package com.maekom.codetracker.analysis
 
 import com.intellij.openapi.project.Project
 import com.maekom.codetracker.git.GitRepositoryService
+import com.maekom.codetracker.model.CodeHunkPointer
 import com.maekom.codetracker.model.CommitSummary
 import com.maekom.codetracker.model.FileDiffDetail
 import com.maekom.codetracker.model.MarkdownFileRef
@@ -24,7 +25,7 @@ import org.commonmark.parser.Parser
 /**
  * Parses Markdown (.md) documents using CommonMark AST and automatically links
  * relevant headings (#, ##, ###) and checked checklist items (- [x]) to code commits
- * within the same or immediately preceding Work Episode.
+ * and individual Diff Hunks within the same or immediately preceding Work Episode.
  */
 object MarkdownContextMatcher {
 
@@ -33,6 +34,9 @@ object MarkdownContextMatcher {
     private val CHECKED_ITEM_REGEX = Regex("""^\[[xX]]\s*(.+)$""")
     private val TOKEN_SPLIT_REGEX = Regex("""[^a-zA-Z0-9가-힣]+""")
     private val CAMEL_SPLIT_REGEX = Regex("""(?<=[a-z0-9])(?=[A-Z])""")
+    private val WHITESPACE_REGEX = Regex("""\s+""")
+
+    private const val SHORT_NOTE_MAX_LEN = 65
 
     private val STOP_WORDS = setOf(
         "src", "main", "test", "java", "kotlin", "kt", "com", "org", "net", "io",
@@ -42,6 +46,11 @@ object MarkdownContextMatcher {
         "the", "and", "for", "with", "from", "into", "this", "that", "fix", "feat", "chore", "refactor"
     )
 
+    private val GENERIC_METHOD_VERBS = setOf(
+        "get", "set", "find", "save", "delete", "list", "create", "update",
+        "execute", "process", "handle", "init", "build", "tostring", "equals", "hashcode"
+    )
+
     internal data class RawSection(
         val heading: String,
         val level: Int,
@@ -49,14 +58,23 @@ object MarkdownContextMatcher {
         val checkedItems: MutableList<String> = mutableListOf()
     )
 
-    fun matchContextForCommit(
+    internal data class LoadedMarkdownSection(
+        val ref: MarkdownFileRef,
+        val isSameEpisode: Boolean,
+        val heading: String,
+        val level: Int,
+        val bodyLines: List<String>,
+        val checkedItems: List<String>,
+        val searchableTextLower: String,
+        val headingLower: String
+    )
+
+    internal fun loadAvailableMarkdownSections(
         project: Project,
         repoRootPath: String,
-        commit: CommitSummary,
-        fileDetails: List<FileDiffDetail>,
         currentEpisode: WorkEpisode?,
         previousEpisode: WorkEpisode?
-    ): List<MarkdownSection> {
+    ): List<LoadedMarkdownSection> {
         val candidateRefs = linkedMapOf<String, MarkdownFileRef>()
         // Prioritize .md files from the same episode, then from the immediately preceding episode
         currentEpisode?.markdownFiles?.forEach { ref ->
@@ -67,9 +85,7 @@ object MarkdownContextMatcher {
         }
         if (candidateRefs.isEmpty()) return emptyList()
 
-        val keywords = extractCommitKeywords(commit, fileDetails)
-        val matched = mutableListOf<MarkdownSection>()
-
+        val loaded = mutableListOf<LoadedMarkdownSection>()
         for (ref in candidateRefs.values.take(10)) {
             val content = GitRepositoryService.readFileAtRevision(
                 project = project,
@@ -82,57 +98,226 @@ object MarkdownContextMatcher {
             val isSameEpisode = currentEpisode?.markdownFiles?.any { it.filePath == ref.filePath } == true
 
             for (sec in sections) {
+                val heading = sec.heading.ifBlank { ref.filePath.substringAfterLast('/') }
                 val combinedText = buildString {
-                    append(sec.heading).append('\n')
+                    append(heading).append('\n')
                     sec.checkedItems.forEach { append(it).append('\n') }
                     sec.bodyLines.forEach { append(it).append('\n') }
                 }
-                val lowerCombined = combinedText.lowercase()
-                val lowerHeading = sec.heading.lowercase()
+                loaded.add(
+                    LoadedMarkdownSection(
+                        ref = ref,
+                        isSameEpisode = isSameEpisode,
+                        heading = heading,
+                        level = sec.level,
+                        bodyLines = sec.bodyLines.take(6),
+                        checkedItems = sec.checkedItems.take(8),
+                        searchableTextLower = combinedText.lowercase(),
+                        headingLower = heading.lowercase()
+                    )
+                )
+            }
+        }
+        return loaded
+    }
 
-                val hits = mutableListOf<String>()
-                var score = 0
+    internal fun matchContextForCommit(
+        commit: CommitSummary,
+        fileDetails: List<FileDiffDetail>,
+        loadedSections: List<LoadedMarkdownSection>
+    ): List<MarkdownSection> {
+        if (loadedSections.isEmpty()) return emptyList()
 
-                for (kw in keywords) {
-                    val lowerKw = kw.lowercase()
-                    if (lowerCombined.contains(lowerKw)) {
-                        hits.add(kw)
-                        score += when {
-                            lowerHeading.contains(lowerKw) -> 5
-                            sec.checkedItems.any { it.lowercase().contains(lowerKw) } -> 4
-                            else -> 2
-                        }
+        val keywords = extractCommitKeywords(commit, fileDetails)
+        val matched = mutableListOf<MarkdownSection>()
+
+        for (sec in loadedSections) {
+            val hits = mutableListOf<String>()
+            var score = 0
+
+            for (kw in keywords) {
+                val lowerKw = kw.lowercase()
+                if (sec.searchableTextLower.contains(lowerKw)) {
+                    hits.add(kw)
+                    score += when {
+                        sec.headingLower.contains(lowerKw) -> 5
+                        sec.checkedItems.any { it.lowercase().contains(lowerKw) } -> 4
+                        else -> 2
                     }
                 }
+            }
 
-                // Bonus for same-episode checklists or direct .md commit
-                if (isSameEpisode && sec.checkedItems.isNotEmpty()) {
-                    score += 2
-                }
-                if (ref.commitHash == commit.hash) {
-                    score += 3
-                }
+            if (sec.isSameEpisode && sec.checkedItems.isNotEmpty()) {
+                score += 2
+            }
+            if (sec.ref.commitHash == commit.hash) {
+                score += 3
+            }
 
-                if (score > 0 && (hits.isNotEmpty() || sec.checkedItems.isNotEmpty() || ref.commitHash == commit.hash)) {
-                    matched.add(
-                        MarkdownSection(
-                            filePath = ref.filePath,
-                            commitHash = ref.commitHash,
-                            heading = sec.heading.ifBlank { ref.filePath.substringAfterLast('/') },
-                            level = sec.level,
-                            bodyLines = sec.bodyLines.take(6),
-                            checkedItems = sec.checkedItems.take(8),
-                            matchedKeywords = hits.distinct().take(6),
-                            score = score
-                        )
+            if (score > 0 && (hits.isNotEmpty() || sec.checkedItems.isNotEmpty() || sec.ref.commitHash == commit.hash)) {
+                matched.add(
+                    MarkdownSection(
+                        filePath = sec.ref.filePath,
+                        commitHash = sec.ref.commitHash,
+                        heading = sec.heading,
+                        level = sec.level,
+                        bodyLines = sec.bodyLines,
+                        checkedItems = sec.checkedItems,
+                        matchedKeywords = hits.distinct().take(6),
+                        score = score
                     )
-                }
+                )
             }
         }
 
         return matched
             .sortedByDescending { it.score }
             .take(5)
+    }
+
+    /**
+     * Precision Hunk-level Markdown matching:
+     * 1st priority: concrete method name (>= 4 chars, not generic verb) or detected API route URI in hunk range.
+     * 2nd priority (fallback without duplication): only if zero hunks matched in the file, match class name
+     * and attach solely to the file's first valid hunk.
+     */
+    internal fun attachHunkMarkdownNotes(
+        fileDetails: List<FileDiffDetail>,
+        loadedSections: List<LoadedMarkdownSection>
+    ): List<FileDiffDetail> {
+        if (loadedSections.isEmpty()) return fileDetails
+
+        return fileDetails.map { fd ->
+            if (fd.skippedLargeOrBinary ||
+                fd.onlyImportOrWhitespaceChanges ||
+                fd.hunks.isEmpty() ||
+                fd.summary.path.endsWith(".md", ignoreCase = true)
+            ) {
+                return@map fd
+            }
+
+            var anyPriority1Matched = false
+            val enrichedHunks = fd.hunks.map { hunk ->
+                val p1Terms = extractPrecisionHunkTerms(fd, hunk)
+                val bestSection = findBestSectionForTerms(p1Terms, loadedSections)
+                if (bestSection != null) {
+                    anyPriority1Matched = true
+                    val (shortNote, fullNote) = formatHunkMarkdownNotes(bestSection)
+                    hunk.copy(
+                        matchedMdShortNote = shortNote,
+                        matchedMdFullNote = fullNote
+                    )
+                } else {
+                    hunk
+                }
+            }.toMutableList()
+
+            // 2nd priority: class-name fallback attached only once to the first valid hunk
+            if (!anyPriority1Matched && enrichedHunks.isNotEmpty()) {
+                val className = fd.summary.fileName.substringBeforeLast('.').trim()
+                if (className.length >= 4 && className.lowercase() !in GENERIC_METHOD_VERBS) {
+                    val fallbackSection = findBestSectionForTerms(listOf(className), loadedSections)
+                    if (fallbackSection != null) {
+                        val (shortNote, fullNote) = formatHunkMarkdownNotes(fallbackSection)
+                        enrichedHunks[0] = enrichedHunks[0].copy(
+                            matchedMdShortNote = shortNote,
+                            matchedMdFullNote = fullNote
+                        )
+                    }
+                }
+            }
+
+            fd.copy(hunks = enrichedHunks)
+        }
+    }
+
+    private fun extractPrecisionHunkTerms(
+        fd: FileDiffDetail,
+        hunk: CodeHunkPointer
+    ): List<String> {
+        val terms = linkedSetOf<String>()
+
+        // Concrete method name (strip parens and MyBatis tag# prefix, length >= 4, exclude generic verbs)
+        val rawMethod = hunk.detectedMethodName
+            ?.substringAfter('#')
+            ?.substringBefore('(')
+            ?.trim()
+        if (!rawMethod.isNullOrBlank() &&
+            rawMethod.length >= 4 &&
+            rawMethod.lowercase() !in GENERIC_METHOD_VERBS
+        ) {
+            terms.add(rawMethod)
+        }
+
+        // Detected API routes (HTTP mappings / External URIs) falling within this hunk's line span
+        val hunkEnd = hunk.newStartLine + hunk.newLineCount.coerceAtLeast(1)
+        for (api in fd.apiHints) {
+            if (api.lineNumber in hunk.newStartLine..hunkEnd) {
+                val route = api.pathOrUri.trim()
+                if (route.length >= 3 && route != "(root)") {
+                    terms.add(route)
+                }
+            }
+        }
+
+        return terms.toList()
+    }
+
+    private fun findBestSectionForTerms(
+        terms: List<String>,
+        loadedSections: List<LoadedMarkdownSection>
+    ): LoadedMarkdownSection? {
+        if (terms.isEmpty()) return null
+        var best: LoadedMarkdownSection? = null
+        var bestScore = 0
+
+        for (sec in loadedSections) {
+            var score = 0
+            for (term in terms) {
+                val lowerTerm = term.lowercase()
+                if (sec.searchableTextLower.contains(lowerTerm)) {
+                    score += when {
+                        sec.headingLower.contains(lowerTerm) -> 6
+                        sec.checkedItems.any { it.lowercase().contains(lowerTerm) } -> 5
+                        else -> 3
+                    }
+                }
+            }
+            if (score > 0) {
+                if (sec.isSameEpisode) score += 2
+                if (score > bestScore) {
+                    bestScore = score
+                    best = sec
+                }
+            }
+        }
+        return best
+    }
+
+    internal fun formatHunkMarkdownNotes(sec: LoadedMarkdownSection): Pair<String, String> {
+        val docFileName = sec.ref.filePath.substringAfterLast('/')
+        val summaryParts = mutableListOf<String>()
+        sec.checkedItems.take(3).forEach { summaryParts.add("[x] $it") }
+        if (summaryParts.size < 3) {
+            val remaining = 3 - summaryParts.size
+            sec.bodyLines.take(remaining).forEach { summaryParts.add(it) }
+        }
+
+        val summaryBody = summaryParts.joinToString("\n").trim()
+        val fullNote = if (summaryBody.isNotBlank()) {
+            "[$docFileName] ${sec.heading} -> $summaryBody"
+        } else {
+            "[$docFileName] ${sec.heading}"
+        }
+
+        val singleLine = WHITESPACE_REGEX.replace(fullNote, " ").trim()
+        val shortNote = if (singleLine.length > SHORT_NOTE_MAX_LEN) {
+            singleLine.take(SHORT_NOTE_MAX_LEN - 3).trimEnd() + "..."
+        } else {
+            singleLine
+        }
+
+        return shortNote to fullNote
     }
 
     internal fun parseMarkdownSections(markdown: String): List<RawSection> {
@@ -223,7 +408,6 @@ object MarkdownContextMatcher {
                 keywords.add(baseName)
             }
             splitIdentifierTokens(baseName).forEach { keywords.add(it) }
-            // Parent folder domain name
             val segments = file.path.split('/')
             segments.dropLast(1).takeLast(2).forEach { seg ->
                 splitIdentifierTokens(seg).forEach { keywords.add(it) }

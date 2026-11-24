@@ -79,6 +79,10 @@ object MarkdownReportExporter {
                     else -> {
                         for (h in fd.hunks) {
                             appendLine("  - 📍 Line ${h.newStartLine} : `${h.displayContext}` (+${h.addedLines}/-${h.deletedLines})")
+                            if (!h.matchedMdFullNote.isNullOrBlank()) {
+                                val noteSingleLine = h.matchedMdFullNote.replace(Regex("\\s+"), " ").trim()
+                                appendLine("    - > 📝 $noteSingleLine")
+                            }
                         }
                     }
                 }

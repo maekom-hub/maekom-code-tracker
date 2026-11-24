@@ -66,6 +66,7 @@ import javax.swing.JPanel
 import javax.swing.JPopupMenu
 import javax.swing.JTree
 import javax.swing.SwingUtilities
+import javax.swing.ToolTipManager
 import javax.swing.UIManager
 import javax.swing.event.DocumentEvent
 import javax.swing.event.DocumentListener
@@ -140,6 +141,12 @@ class CodeTrackerPanel(private val project: Project) : JBPanel<CodeTrackerPanel>
     private data class LayerGroupNodeData(val layer: PrimaryLayer, val fileCount: Int)
     private data class FileNodeData(val fileDetail: FileDiffDetail)
     private data class HunkNodeData(val fileDetail: FileDiffDetail, val pointer: CodeHunkPointer)
+    private data class PointerMdNoteNodeData(
+        val fileDetail: FileDiffDetail,
+        val pointer: CodeHunkPointer,
+        val shortNote: String,
+        val fullNote: String
+    )
 
     init {
         border = JBUI.Borders.empty(4)
@@ -200,6 +207,7 @@ class CodeTrackerPanel(private val project: Project) : JBPanel<CodeTrackerPanel>
         pointerTree.selectionModel.selectionMode = TreeSelectionModel.SINGLE_TREE_SELECTION
         pointerTree.cellRenderer = PointerTreeCellRenderer()
         pointerTree.emptyText.text = "커밋을 선택하면 레이어별 수정 위치 포인터가 표시됩니다."
+        ToolTipManager.sharedInstance().registerComponent(pointerTree)
     }
 
     private fun configureIconOnlyButton(button: JButton, tooltip: String) {
@@ -377,6 +385,11 @@ class CodeTrackerPanel(private val project: Project) : JBPanel<CodeTrackerPanel>
                                 navigateToFileOrHunk(obj.fileDetail, obj.pointer)
                             }
                         }
+                        is PointerMdNoteNodeData -> {
+                            if (e.clickCount >= 1) {
+                                navigateToFileOrHunk(obj.fileDetail, obj.pointer)
+                            }
+                        }
                         is FileNodeData -> {
                             if (e.clickCount >= 2) {
                                 navigateToFileOrHunk(obj.fileDetail, obj.fileDetail.hunks.firstOrNull())
@@ -404,6 +417,7 @@ class CodeTrackerPanel(private val project: Project) : JBPanel<CodeTrackerPanel>
                     val node = pointerTree.lastSelectedPathComponent as? DefaultMutableTreeNode ?: return
                     when (val obj = node.userObject) {
                         is HunkNodeData -> navigateToFileOrHunk(obj.fileDetail, obj.pointer)
+                        is PointerMdNoteNodeData -> navigateToFileOrHunk(obj.fileDetail, obj.pointer)
                         is FileNodeData -> navigateToFileOrHunk(obj.fileDetail, obj.fileDetail.hunks.firstOrNull())
                     }
                 }
@@ -422,6 +436,10 @@ class CodeTrackerPanel(private val project: Project) : JBPanel<CodeTrackerPanel>
                 pointer = obj.fileDetail.hunks.firstOrNull()
             }
             is HunkNodeData -> {
+                fileDetail = obj.fileDetail
+                pointer = obj.pointer
+            }
+            is PointerMdNoteNodeData -> {
                 fileDetail = obj.fileDetail
                 pointer = obj.pointer
             }
@@ -814,7 +832,20 @@ class CodeTrackerPanel(private val project: Project) : JBPanel<CodeTrackerPanel>
                     }
                     else -> {
                         for (hunk in fd.hunks) {
-                            fileNode.add(DefaultMutableTreeNode(HunkNodeData(fd, hunk)))
+                            val hunkNode = DefaultMutableTreeNode(HunkNodeData(fd, hunk))
+                            if (!hunk.matchedMdShortNote.isNullOrBlank()) {
+                                hunkNode.add(
+                                    DefaultMutableTreeNode(
+                                        PointerMdNoteNodeData(
+                                            fileDetail = fd,
+                                            pointer = hunk,
+                                            shortNote = hunk.matchedMdShortNote,
+                                            fullNote = hunk.matchedMdFullNote ?: hunk.matchedMdShortNote
+                                        )
+                                    )
+                                )
+                            }
+                            fileNode.add(hunkNode)
                         }
                     }
                 }
@@ -824,8 +855,10 @@ class CodeTrackerPanel(private val project: Project) : JBPanel<CodeTrackerPanel>
         }
 
         pointerModel.reload()
-        for (i in 0 until pointerTree.rowCount) {
-            pointerTree.expandRow(i)
+        var row = 0
+        while (row < pointerTree.rowCount) {
+            pointerTree.expandRow(row)
+            row++
         }
     }
 
@@ -846,6 +879,7 @@ class CodeTrackerPanel(private val project: Project) : JBPanel<CodeTrackerPanel>
         val fileDetail = when (val obj = node?.userObject) {
             is FileNodeData -> obj.fileDetail
             is HunkNodeData -> obj.fileDetail
+            is PointerMdNoteNodeData -> obj.fileDetail
             else -> selectedDetail?.fileDetails?.firstOrNull()
         }
         if (fileDetail == null) {
@@ -1024,6 +1058,7 @@ class CodeTrackerPanel(private val project: Project) : JBPanel<CodeTrackerPanel>
             row: Int,
             hasFocus: Boolean
         ) {
+            toolTipText = null
             val node = value as? DefaultMutableTreeNode ?: return
             when (val obj = node.userObject) {
                 is LayerGroupNodeData -> {
@@ -1056,11 +1091,34 @@ class CodeTrackerPanel(private val project: Project) : JBPanel<CodeTrackerPanel>
                     append("  (+${p.addedLines}/-${p.deletedLines})", SimpleTextAttributes.GRAYED_ATTRIBUTES)
                 }
 
+                is PointerMdNoteNodeData -> {
+                    icon = null
+                    val noteColor = UIManager.getColor("Label.disabledForeground") ?: JBColor.GRAY
+                    append("📝 ${obj.shortNote}", SimpleTextAttributes(SimpleTextAttributes.STYLE_PLAIN, noteColor))
+                    toolTipText = formatMultilineTooltip(obj.fullNote)
+                }
+
                 else -> {
                     icon = AllIcons.General.Information
                     append(obj?.toString().orEmpty(), SimpleTextAttributes.GRAYED_ATTRIBUTES)
                 }
             }
+        }
+
+        private fun formatMultilineTooltip(raw: String): String {
+            val escaped = buildString(raw.length) {
+                for (c in raw) {
+                    when (c) {
+                        '&' -> append("&amp;")
+                        '<' -> append("&lt;")
+                        '>' -> append("&gt;")
+                        '"' -> append("&quot;")
+                        '\n' -> append("<br/>")
+                        else -> append(c)
+                    }
+                }
+            }
+            return "<html><body style='width: 360px;'>$escaped</body></html>"
         }
     }
 }

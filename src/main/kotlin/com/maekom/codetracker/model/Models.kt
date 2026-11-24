@@ -198,7 +198,9 @@ data class CodeHunkPointer(
     val detectedMethodName: String?,
     val displayContext: String,
     val addedLines: Int,
-    val deletedLines: Int
+    val deletedLines: Int,
+    val matchedMdShortNote: String? = null,
+    val matchedMdFullNote: String? = null
 )
 
 data class ApiEndpointHint(
