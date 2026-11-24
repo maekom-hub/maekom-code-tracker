@@ -48,6 +48,7 @@ PostgreSQL(JPA + MyBatis), Redis, MongoDB 및 외부 MSA/레거시 API 연동이
 <!-- VERSION_HISTORY_START -->
 | 버전 | 릴리즈 날짜 | 주요 변경 요약 | 다운로드 |
 | --- | --- | --- | --- |
+| `v0.2.1` | 2026-11-24 | API/Batch 엔트리포인트 역추적, 아키텍처 실행 흐름도 재조립 뷰, 트랜잭션·쿼리 실무 위험도 레이더 추가 | [maekom-code-tracker-0.2.1.zip](https://github.com/maekom-hub/maekom-code-tracker/releases/download/v0.2.1/maekom-code-tracker-0.2.1.zip) |
 | `v0.2.0` | 2026-11-24 | v0.2.0 메이저 업데이트: API/Batch 엔트리포인트 역추적, 실행 흐름도 재조립 뷰, 트랜잭션·쿼리 위험도 자동 레이더 추가 | [maekom-code-tracker-0.2.0.zip](https://github.com/maekom-hub/maekom-code-tracker/releases/download/v0.2.0/maekom-code-tracker-0.2.0.zip) |
 | `v0.1.8` | 2026-11-24 | 파일 수정 이력 미배포 그룹 브랜치명 반영 및 전체 UI 무재시작 KO/EN 한영 전환 스위치 추가 | [maekom-code-tracker-0.1.8.zip](https://github.com/maekom-hub/maekom-code-tracker/releases/download/v0.1.8/maekom-code-tracker-0.1.8.zip) |
 | `v0.1.7` | 2026-11-24 | 파일 수정 이력 팝업 네이티브 로딩 스피너 모션, 창 크기 기억 및 연속 탐색 UX 고도화 | [maekom-code-tracker-0.1.7.zip](https://github.com/maekom-hub/maekom-code-tracker/releases/download/v0.1.7/maekom-code-tracker-0.1.7.zip) |

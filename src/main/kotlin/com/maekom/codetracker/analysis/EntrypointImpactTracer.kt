@@ -24,6 +24,7 @@ import com.maekom.codetracker.model.CodeHunkPointer
 import com.maekom.codetracker.model.EntrypointKind
 import com.maekom.codetracker.model.EntrypointTarget
 import com.maekom.codetracker.model.EntrypointTraceResult
+import com.maekom.codetracker.model.ExecutionFlowSubCategory
 import com.maekom.codetracker.model.FileDiffDetail
 import java.nio.charset.StandardCharsets
 import java.nio.file.Files
@@ -33,9 +34,10 @@ import java.util.concurrent.ConcurrentHashMap
 
 /**
  * Community-Edition-compatible IntelliJ Java PSI & Reference Graph upward caller tracer.
- * Traces modified Java/Kotlin methods and MyBatis Mapper XML SQL IDs upward through
- * Spring Interface -> Impl bridges (`findDeepestSuperMethods()`) to identify impacted
- * Web API Controllers, Batch Jobs/Steps/Tasklets, Schedulers, and Event/MQ Listeners.
+ * Traces modified Java/Kotlin methods, DTO/Request/Response/Entity classes, and MyBatis XML SQL IDs
+ * upward through Spring Interface -> Impl bridges (`findDeepestSuperMethods()`) to identify impacted
+ * Web API Controllers, Batch Jobs/Steps/Tasklets, Schedulers, and Event/MQ Listeners, complete with
+ * full call chains and contextual impact reason summaries.
  */
 object EntrypointImpactTracer {
 
@@ -64,8 +66,26 @@ object EntrypointImpactTracer {
         "AbstractItemCountingItemStreamItemReader", "ChunkOrientedTasklet"
     )
 
-    // Cache: (projectHash::commitHash::filePath::methodKey) -> EntrypointTraceResult
     private val methodTraceCache = ConcurrentHashMap<String, EntrypointTraceResult>()
+
+    private data class SeedOrigin(
+        val originClassName: String,
+        val originMethodName: String?,
+        val subCategory: ExecutionFlowSubCategory,
+        val filePath: String
+    ) {
+        fun shortOriginLabel(): String = if (!originMethodName.isNullOrBlank()) {
+            "$originClassName.$originMethodName()"
+        } else {
+            originClassName
+        }
+    }
+
+    private data class BfsNode(
+        val method: PsiMethod,
+        val depth: Int,
+        val chainFromOrigin: List<String>
+    )
 
     fun traceCommitEntrypoints(
         project: Project,
@@ -131,7 +151,7 @@ object EntrypointImpactTracer {
 
     private fun isExcludedFromTrace(normalizedPath: String): Boolean {
         val lower = normalizedPath.lowercase()
-        if (lower.contains("src/test/") || lower.startsWith("test/")) return true
+        if (lower.contains("src/test/") || lower.contains("/test/") || lower.startsWith("test/")) return true
         return !(lower.endsWith(".java") || lower.endsWith(".kt") || lower.endsWith(".xml"))
     }
 
@@ -147,11 +167,21 @@ object EntrypointImpactTracer {
                     return@runReadAction EntrypointTraceResult(isDumbMode = true)
                 }
                 val scope = GlobalSearchScope.projectScope(project)
-                val seedMethods = resolveSeedMethods(project, repoRootPath, fd, hunk, scope)
+                val subCategory = ArchitectureFlowBuilder.classifySubCategory(fd.summary.path, fd.summary.primaryLayer)
+                val originClassName = fd.summary.fileName.substringBeforeLast('.')
+                val originMethodName = hunk.detectedMethodName?.substringAfter('#')?.substringBefore('(')?.trim()
+                val origin = SeedOrigin(
+                    originClassName = originClassName,
+                    originMethodName = originMethodName,
+                    subCategory = subCategory,
+                    filePath = fd.summary.path
+                )
+
+                val (seedMethods, initialDepth) = resolveSeedMethodsOrClassReferrers(project, repoRootPath, fd, hunk, scope)
                 if (seedMethods.isEmpty()) {
                     return@runReadAction EntrypointTraceResult()
                 }
-                bfsTraceUpward(seedMethods, scope)
+                bfsTraceUpward(seedMethods, initialDepth, origin, scope)
             }
         } catch (_: IndexNotReadyException) {
             EntrypointTraceResult(isDumbMode = true)
@@ -160,19 +190,19 @@ object EntrypointImpactTracer {
         }
     }
 
-    private fun resolveSeedMethods(
+    private fun resolveSeedMethodsOrClassReferrers(
         project: Project,
         repoRootPath: String,
         fd: FileDiffDetail,
         hunk: CodeHunkPointer,
         scope: GlobalSearchScope
-    ): List<PsiMethod> {
+    ): Pair<List<PsiMethod>, Int> {
         val relPath = fd.summary.path.replace('\\', '/')
         val lower = relPath.lowercase()
 
         // Case 1: MyBatis XML (*Mapper.xml or XML with <mapper namespace="...">)
         if (lower.endsWith(".xml")) {
-            return resolveMyBatisMapperMethods(project, repoRootPath, relPath, hunk, scope)
+            return resolveMyBatisMapperMethods(project, repoRootPath, relPath, hunk, scope) to 0
         }
 
         // Case 2: Java / Kotlin source file via PsiClassOwner or PsiShortNamesCache
@@ -219,7 +249,27 @@ object EntrypointImpactTracer {
             }
         }
 
-        return seeds.toList()
+        if (seeds.isNotEmpty()) {
+            return seeds.toList() to 0
+        }
+
+        // Case 3: DTO / Request / Response / Entity field modification (no enclosing method) -> trace class references
+        val classReferrerMethods = linkedSetOf<PsiMethod>()
+        for (cls in classes.take(2)) {
+            var count = 0
+            ReferencesSearch.search(cls, scope).forEach(Processor { ref ->
+                if (count >= MAX_REFS_PER_TARGET) return@Processor false
+                count++
+                val refPath = ref.element.containingFile?.virtualFile?.path?.replace('\\', '/')?.lowercase() ?: ""
+                if (refPath.contains("/src/test/") || refPath.contains("/test/")) return@Processor true
+                val m = PsiTreeUtil.getParentOfType(ref.element, PsiMethod::class.java, false)
+                if (m != null) {
+                    classReferrerMethods.add(m)
+                }
+                true
+            })
+        }
+        return classReferrerMethods.toList() to 1
     }
 
     private fun resolveMyBatisMapperMethods(
@@ -237,12 +287,10 @@ object EntrypointImpactTracer {
         val namespace = MAPPER_NAMESPACE_REGEX.find(fullText)?.groupValues?.getOrNull(1)?.trim() ?: return emptyList()
 
         val sqlIds = linkedSetOf<String>()
-        // 1) Method id already extracted from hunk (e.g. "select#findActiveUsim")
         hunk.detectedMethodName?.let { raw ->
             val id = if (raw.contains('#')) raw.substringAfter('#').trim() else raw.trim()
             if (id.isNotBlank()) sqlIds.add(id)
         }
-        // 2) Scan upward from hunk.newStartLine to locate enclosing <select|insert|update|delete id="...">
         if (sqlIds.isEmpty()) {
             val startIdx = (hunk.newStartLine - 1).coerceIn(0, xmlLines.lastIndex)
             val scanMin = (startIdx - 60).coerceAtLeast(0)
@@ -266,25 +314,34 @@ object EntrypointImpactTracer {
 
     private fun bfsTraceUpward(
         seedMethods: List<PsiMethod>,
+        initialDepth: Int,
+        origin: SeedOrigin,
         scope: GlobalSearchScope
     ): EntrypointTraceResult {
         val visited = HashSet<String>()
-        val queue = ArrayDeque<Pair<PsiMethod, Int>>()
+        val queue = ArrayDeque<BfsNode>()
         val foundEntrypoints = linkedMapOf<String, EntrypointTarget>()
         var truncated = false
 
         for (seed in seedMethods) {
             val key = canonicalMethodKey(seed)
             if (visited.add(key)) {
-                queue.add(seed to 0)
+                val seedLabel = readableMethodLabel(seed)
+                val initialChain = if (initialDepth > 0) {
+                    listOf(origin.originClassName, seedLabel)
+                } else {
+                    listOf(seedLabel)
+                }
+                queue.add(BfsNode(seed, initialDepth, initialChain))
             }
         }
 
         while (queue.isNotEmpty()) {
-            val (currentMethod, depth) = queue.removeFirst()
+            val current = queue.removeFirst()
+            val currentMethod = current.method
+            val depth = current.depth
 
-            // Identify if currentMethod is itself an API / Batch / Scheduler / Listener entrypoint
-            detectEntrypoint(currentMethod, depth)?.let { target ->
+            detectEntrypoint(currentMethod, depth, current.chainFromOrigin, origin)?.let { target ->
                 val epKey = "${target.kind}|${target.displayLabel}|${target.filePath}|${target.lineNumber1Based}"
                 val prev = foundEntrypoints[epKey]
                 if (prev == null || target.hopDepth < prev.hopDepth) {
@@ -301,7 +358,7 @@ object EntrypointImpactTracer {
                 break
             }
 
-            // Spring Interface -> Impl bridge: include both this method AND deepest super/interface methods
+            // Spring Interface -> Impl bridge: include both this method AND super/interface methods
             val searchTargets = linkedSetOf<PsiMethod>()
             searchTargets.add(currentMethod)
             runCatching {
@@ -324,7 +381,7 @@ object EntrypointImpactTracer {
 
                     val refElem = ref.element
                     val refPath = refElem.containingFile?.virtualFile?.path?.replace('\\', '/')?.lowercase() ?: ""
-                    if (refPath.contains("/src/test/") || refPath.startsWith("test/")) {
+                    if (refPath.contains("/src/test/") || refPath.contains("/test/") || refPath.startsWith("test/")) {
                         return@Processor true
                     }
 
@@ -332,7 +389,8 @@ object EntrypointImpactTracer {
                         ?: return@Processor true
                     val callerKey = canonicalMethodKey(callerMethod)
                     if (visited.add(callerKey)) {
-                        queue.add(callerMethod to (depth + 1))
+                        val nextChain = current.chainFromOrigin + readableMethodLabel(callerMethod)
+                        queue.add(BfsNode(callerMethod, depth + 1, nextChain))
                     }
                     true
                 })
@@ -346,13 +404,20 @@ object EntrypointImpactTracer {
         )
     }
 
-    private fun detectEntrypoint(method: PsiMethod, hopDepth: Int): EntrypointTarget? {
+    private fun detectEntrypoint(
+        method: PsiMethod,
+        hopDepth: Int,
+        chainFromOrigin: List<String>,
+        origin: SeedOrigin
+    ): EntrypointTarget? {
         val cls = method.containingClass ?: return null
         val vf = cls.containingFile?.virtualFile ?: return null
         val filePath = vf.path
         val line1Based = resolveLineNumber1Based(method)
         val className = cls.name ?: "UnknownClass"
         val methodName = method.name
+        val topDownChain = chainFromOrigin.asReversed().distinct()
+        val (reasonKo, reasonEn) = buildImpactReason(origin, hopDepth)
 
         // 1) Web API Controller check
         val isController = hasAnyAnnotation(cls.annotations, CONTROLLER_ANNOTATIONS)
@@ -367,7 +432,10 @@ object EntrypointImpactTracer {
                     lineNumber1Based = line1Based,
                     className = className,
                     methodName = methodName,
-                    hopDepth = hopDepth
+                    hopDepth = hopDepth,
+                    impactReasonKo = reasonKo,
+                    impactReasonEn = reasonEn,
+                    callChain = topDownChain
                 )
             }
         }
@@ -381,7 +449,10 @@ object EntrypointImpactTracer {
                 lineNumber1Based = line1Based,
                 className = className,
                 methodName = methodName,
-                hopDepth = hopDepth
+                hopDepth = hopDepth,
+                impactReasonKo = reasonKo,
+                impactReasonEn = reasonEn,
+                callChain = topDownChain
             )
         }
 
@@ -396,7 +467,10 @@ object EntrypointImpactTracer {
                 lineNumber1Based = line1Based,
                 className = className,
                 methodName = methodName,
-                hopDepth = hopDepth
+                hopDepth = hopDepth,
+                impactReasonKo = reasonKo,
+                impactReasonEn = reasonEn,
+                callChain = topDownChain
             )
         }
 
@@ -412,11 +486,58 @@ object EntrypointImpactTracer {
                 lineNumber1Based = line1Based,
                 className = className,
                 methodName = methodName,
-                hopDepth = hopDepth
+                hopDepth = hopDepth,
+                impactReasonKo = reasonKo,
+                impactReasonEn = reasonEn,
+                callChain = topDownChain
             )
         }
 
         return null
+    }
+
+    private fun buildImpactReason(origin: SeedOrigin, hopDepth: Int): Pair<String, String> {
+        val target = origin.shortOriginLabel()
+        if (hopDepth == 0) {
+            return "$target 엔트리포인트 직접 수정" to "Direct modification in entrypoint $target"
+        }
+        return when (origin.subCategory) {
+            ExecutionFlowSubCategory.REQUEST ->
+                "${origin.originClassName} 필드 수정에 따른 요청 파라미터 검증 영향" to
+                    "Request parameter & validation impact from changes in ${origin.originClassName}"
+
+            ExecutionFlowSubCategory.RESPONSE ->
+                "${origin.originClassName} 구조 변경에 따른 API 응답 스펙 영향" to
+                    "API response spec impact from changes in ${origin.originClassName}"
+
+            ExecutionFlowSubCategory.ENTITY_DOMAIN,
+            ExecutionFlowSubCategory.COMMON_DTO_VO ->
+                "${origin.originClassName} 데이터 모델 변경에 따른 입출력 스펙 영향" to
+                    "I/O model impact from schema changes in ${origin.originClassName}"
+
+            ExecutionFlowSubCategory.REPOSITORY_DAO,
+            ExecutionFlowSubCategory.MAPPER_QUERY ->
+                "$target 쿼리/데이터 접근 변경으로 인한 조회·저장 결과 영향" to
+                    "Query & persistence result impact from changes in $target"
+
+            ExecutionFlowSubCategory.SERVICE_INTERFACE,
+            ExecutionFlowSubCategory.SERVICE_IMPL ->
+                "$target 로직 변경으로 인한 응답 데이터 영향" to
+                    "Response data impact from business logic changes in $target"
+
+            ExecutionFlowSubCategory.COMPONENT_MANAGER ->
+                "$target 연동·컴포넌트 로직 변경으로 인한 처리 결과 영향" to
+                    "Processing & integration impact from changes in $target"
+
+            else ->
+                "$target 변경에 따른 상위 진입점 동작 영향" to
+                    "Downstream behavior impact from changes in $target"
+        }
+    }
+
+    private fun readableMethodLabel(method: PsiMethod): String {
+        val cls = method.containingClass?.name ?: "Unknown"
+        return "$cls.${method.name}()"
     }
 
     private fun extractHttpMapping(cls: PsiClass, method: PsiMethod): Pair<String, String>? {

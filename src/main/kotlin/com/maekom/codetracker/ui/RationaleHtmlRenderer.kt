@@ -8,7 +8,6 @@ import com.maekom.codetracker.i18n.CodeTrackerI18n
 import com.maekom.codetracker.model.BadgeSeverity
 import com.maekom.codetracker.model.CommitDetail
 import com.maekom.codetracker.model.CommitSummary
-import com.maekom.codetracker.model.EntrypointTraceResult
 import com.maekom.codetracker.model.MergedFileAnalysisDetail
 import com.maekom.codetracker.model.RadarSeverity
 import com.maekom.codetracker.model.SideEffectAlert
@@ -108,10 +107,7 @@ object RationaleHtmlRenderer {
             }
             append("</div>")
 
-            // Top Section A: Impacted Entrypoints (PSI call-graph upward trace, clickable chips)
-            appendEntrypointsSection(detail.entrypointTrace, muted, cardBg, borderColor, accentBlue)
-
-            // Top Section B: Backend Side-Effect Risk Radar (clickable jump to exact hunk line)
+            // Top Section: Backend Side-Effect Risk Radar (clickable jump to exact hunk line)
             appendSideEffectRadarSection(detail.sideEffectAlerts, fg, muted)
 
             // Cross-layer flow summary
@@ -226,13 +222,12 @@ object RationaleHtmlRenderer {
             append("</div>")
 
             append("<div style=\"background-color: $flowBg; border-left: 3px solid $accentBlue; padding: 3px 6px; margin-bottom: 5px;\">")
-            append("<b>${escapeHtml(mf.stage.localizedTitle())}</b>")
+            append("<b>${escapeHtml(mf.stage.localizedTitle())} &raquo; ${escapeHtml(mf.subCategory.displayLabel)}</b>")
             if (merged.allStackTags.isNotEmpty()) {
                 append(" &nbsp;&raquo;&nbsp; ${escapeHtml(merged.allStackTags.joinToString(", ") { it.label })}")
             }
             append("</div>")
 
-            appendEntrypointsSection(merged.entrypointTrace, muted, cardBg, borderColor, accentBlue)
             appendSideEffectRadarSection(merged.sideEffectAlerts, fg, muted)
 
             // Related commits timeline for this merged file
@@ -253,43 +248,6 @@ object RationaleHtmlRenderer {
 
             append("</body></html>")
         }
-    }
-
-    private fun StringBuilder.appendEntrypointsSection(
-        trace: EntrypointTraceResult,
-        muted: String,
-        cardBg: String,
-        borderColor: String,
-        accentBlue: String
-    ) {
-        if (!trace.isDumbMode && trace.entrypoints.isEmpty()) return
-
-        append("<div style=\"margin-bottom: 5px;\">")
-        append("<div class=\"sec-label\" style=\"color: $muted;\">${escapeHtml(CodeTrackerI18n.impactedEntrypointsTitle())}")
-        if (trace.truncatedByLimit) {
-            append(" <span style=\"font-weight: normal;\">${escapeHtml(CodeTrackerI18n.entrypointTruncatedHint())}</span>")
-        }
-        append("</div>")
-
-        if (trace.isDumbMode) {
-            append("<div style=\"background-color: $cardBg; border: 1px solid $borderColor; padding: 3px 6px; color: $muted;\">")
-            append(escapeHtml(CodeTrackerI18n.entrypointDumbModeNotice()))
-            append("</div>")
-        } else {
-            val chipBg = toHex(JBColor(Color(0xEAF2FF), Color(0x23344D)))
-            val chipBorder = toHex(JBColor(Color(0xB8D0F8), Color(0x3C5A82)))
-            append("<div style=\"line-height: 1.8;\">")
-            trace.entrypoints.forEachIndexed { idx, ep ->
-                val depthSuffix = if (ep.hopDepth > 0) " (${ep.hopDepth} hop)" else ""
-                append(
-                    "<a href=\"ep:$idx\" style=\"background-color: $chipBg; border: 1px solid $chipBorder; " +
-                        "color: $accentBlue; padding: 1px 5px; margin-right: 4px;\">" +
-                        "<b>${escapeHtml(ep.displayLabel)}</b>${escapeHtml(depthSuffix)}</a> "
-                )
-            }
-            append("</div>")
-        }
-        append("</div>")
     }
 
     private fun StringBuilder.appendSideEffectRadarSection(

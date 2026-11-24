@@ -58,29 +58,76 @@ import javax.swing.tree.TreePath
 import javax.swing.tree.TreeSelectionModel
 
 /**
- * Modeless DialogWrapper displaying version/tag-grouped file modification history
- * with IntelliJ native loading spinners, on-demand commit rationale, smart pointers,
- * and zero-restart live KO/EN localization sync.
+ * Project-scoped Single-Instance Modeless DialogWrapper displaying version/tag-grouped
+ * file modification history with IntelliJ native loading spinners, on-demand commit rationale,
+ * line-by-line Impacted Entrypoints, smart pointers, and zero-restart live KO/EN sync.
  */
-class FileHistoryDialog(
+class FileHistoryDialog private constructor(
     private val project: Project,
-    private val repoRootPath: String,
-    private val branch: String,
-    private val startDate: LocalDate,
-    private val endDate: LocalDate,
-    private val targetFilePath: String,
-    private val noMerges: Boolean
+    private var repoRootPath: String,
+    private var branch: String,
+    private var startDate: LocalDate,
+    private var endDate: LocalDate,
+    private var targetFilePath: String,
+    private var noMerges: Boolean
 ) : DialogWrapper(project, true) {
 
     companion object {
         private val DATE_FMT = DateTimeFormatter.ISO_LOCAL_DATE
         private val DT_FMT = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm")
+        private val activeDialogs = ConcurrentHashMap<Project, FileHistoryDialog>()
+
+        /**
+         * Single-Instance controller per Project:
+         * - If a FileHistoryDialog is already open for [project], brings it to front and reloads it
+         *   with the newly selected file's history immediately.
+         * - Otherwise creates, caches, and shows a new modeless instance.
+         */
+        fun showOrUpdate(
+            project: Project,
+            repoRootPath: String,
+            branch: String,
+            startDate: LocalDate,
+            endDate: LocalDate,
+            targetFilePath: String,
+            noMerges: Boolean
+        ) {
+            val existing = activeDialogs[project]
+            if (existing != null && !existing.isDisposed && existing.window?.isShowing == true) {
+                existing.reloadForTarget(
+                    repoRootPath = repoRootPath,
+                    branch = branch,
+                    startDate = startDate,
+                    endDate = endDate,
+                    targetFilePath = targetFilePath,
+                    noMerges = noMerges
+                )
+                existing.window?.toFront()
+                existing.window?.requestFocus()
+                return
+            }
+
+            val dialog = FileHistoryDialog(
+                project = project,
+                repoRootPath = repoRootPath,
+                branch = branch,
+                startDate = startDate,
+                endDate = endDate,
+                targetFilePath = targetFilePath,
+                noMerges = noMerges
+            )
+            activeDialogs[project] = dialog
+            dialog.show()
+        }
     }
 
     private data class VersionGroupNodeData(val group: FileHistoryVersionGroup)
     private data class HistoryCommitNodeData(val entry: FileHistoryCommitEntry)
     private data class PointerHunkNodeData(val fileDetail: FileDiffDetail, val pointer: CodeHunkPointer)
 
+    private val fileLabel = JBLabel(targetFilePath, AllIcons.FileTypes.Any_type, JBLabel.LEFT).apply {
+        font = font.deriveFont(Font.BOLD)
+    }
     private val scopeLabel = JBLabel(
         CodeTrackerI18n.fileHistoryScope(branch, startDate.format(DATE_FMT), endDate.format(DATE_FMT))
     ).apply {
@@ -109,7 +156,8 @@ class FileHistoryDialog(
     private val historyTree = Tree(historyModel)
     private lateinit var leftLoadingPanel: JBLoadingPanel
 
-    // Right Top: Compact rationale & architecture check panel (same font & style as main panel)
+    // Right Top: Entrypoints line-by-line panel + compact rationale panel
+    private val entrypointsPanel = EntrypointsSectionPanel(project)
     private val rationalePane = JEditorPane().apply {
         isEditable = false
         font = UIManager.getFont("Tree.font") ?: JBUI.Fonts.label()
@@ -141,6 +189,7 @@ class FileHistoryDialog(
     private var selectedEntry: FileHistoryCommitEntry? = null
     private var selectedDetail: CommitDetail? = null
     private val detailCache = ConcurrentHashMap<String, CommitDetail>()
+    private val historyRequestSeq = AtomicInteger(0)
     private val detailRequestSeq = AtomicInteger(0)
 
     init {
@@ -153,9 +202,56 @@ class FileHistoryDialog(
         loadHistoryAsync()
     }
 
+    override fun dispose() {
+        activeDialogs.remove(project, this)
+        super.dispose()
+    }
+
     override fun getDimensionServiceKey(): String = "com.maekom.codetracker.FileHistoryDialog"
 
     override fun createActions(): Array<Action> = arrayOf(cancelAction)
+
+    fun reloadForTarget(
+        repoRootPath: String,
+        branch: String,
+        startDate: LocalDate,
+        endDate: LocalDate,
+        targetFilePath: String,
+        noMerges: Boolean
+    ) {
+        this.repoRootPath = repoRootPath
+        this.branch = branch
+        this.startDate = startDate
+        this.endDate = endDate
+        this.targetFilePath = targetFilePath
+        this.noMerges = noMerges
+
+        detailRequestSeq.incrementAndGet()
+        detailCache.clear()
+        loadedResult = null
+        loadFailed = false
+        selectedEntry = null
+        selectedDetail = null
+
+        title = CodeTrackerI18n.fileHistoryDialogTitle(targetFilePath.substringAfterLast('/'))
+        fileLabel.text = targetFilePath
+        scopeLabel.text = CodeTrackerI18n.fileHistoryScope(branch, startDate.format(DATE_FMT), endDate.format(DATE_FMT))
+        headerCountLabel.text = CodeTrackerI18n.fileHistoryLoadingCount()
+
+        historyRoot.removeAllChildren()
+        historyModel.reload()
+        historyTree.emptyText.text = ""
+
+        entrypointsPanel.clear()
+        rationalePane.text = RationaleHtmlRenderer.renderPlaceholder(CodeTrackerI18n.fileHistorySelectCommitHint())
+        pointerRoot.removeAllChildren()
+        pointerModel.reload()
+        if (::rightLoadingPanel.isInitialized) {
+            rightLoadingPanel.stopLoading()
+        }
+
+        loadHistoryAsync()
+    }
 
     override fun createCenterPanel(): JComponent {
         leftLoadingPanel = JBLoadingPanel(BorderLayout(), disposable)
@@ -175,9 +271,6 @@ class FileHistoryDialog(
                 JBUI.Borders.customLine(JBColor.border(), 0, 0, 1, 0),
                 JBUI.Borders.empty(4, 6, 6, 6)
             )
-            val fileLabel = JBLabel(targetFilePath, AllIcons.FileTypes.Any_type, JBLabel.LEFT).apply {
-                font = font.deriveFont(Font.BOLD)
-            }
             val leftMeta = JPanel(BorderLayout(0, 2)).apply {
                 isOpaque = false
                 add(fileLabel, BorderLayout.NORTH)
@@ -201,11 +294,15 @@ class FileHistoryDialog(
             add(leftLoadingPanel, BorderLayout.CENTER)
         }
 
-        // Right Top: Rationale
+        // Right Top: Header + Line-by-line Impacted Entrypoints + Rationale HTML ScrollPane
+        val rightTopContent = JPanel(BorderLayout()).apply {
+            add(entrypointsPanel, BorderLayout.NORTH)
+            add(JBScrollPane(rationalePane), BorderLayout.CENTER)
+        }
         val rightTopPanel = JPanel(BorderLayout()).apply {
             border = JBUI.Borders.customLine(JBColor.border(), 1)
             add(rightTopHeaderLabel, BorderLayout.NORTH)
-            add(JBScrollPane(rationalePane), BorderLayout.CENTER)
+            add(rightTopContent, BorderLayout.CENTER)
         }
 
         // Right Bottom: Smart Pointers inside JBLoadingPanel
@@ -248,6 +345,7 @@ class FileHistoryDialog(
         rightBottomHeaderLabel.text = CodeTrackerI18n.pointerPanelTitle()
         openDiffButton.toolTipText = CodeTrackerI18n.menuPointerDiff()
         pointerTree.emptyText.text = CodeTrackerI18n.fileHistorySelectCommitHint()
+        entrypointsPanel.refreshLocalization()
 
         if (::leftLoadingPanel.isInitialized) {
             leftLoadingPanel.setLoadingText(CodeTrackerI18n.fileHistoryLoadingLeftText())
@@ -276,11 +374,9 @@ class FileHistoryDialog(
             }
         }
 
-        // Repaint left history tree while preserving expansion & selection
         historyTree.revalidate()
         historyTree.repaint()
 
-        // Re-render right rationale & pointer tree preserving selection
         val detail = selectedDetail
         if (detail != null) {
             val prevSelectedHunkLine = ((pointerTree.lastSelectedPathComponent as? DefaultMutableTreeNode)
@@ -329,22 +425,15 @@ class FileHistoryDialog(
     }
 
     private fun wireListeners() {
-        // Clickable Entrypoints & Side-Effect Radar links inside rationalePane
+        // Clickable Side-Effect Radar links inside rationalePane
         rationalePane.addHyperlinkListener { e ->
             if (e.eventType != HyperlinkEvent.EventType.ACTIVATED) return@addHyperlinkListener
             val desc = e.description ?: return@addHyperlinkListener
             val detail = selectedDetail ?: return@addHyperlinkListener
-            when {
-                desc.startsWith("ep:") -> {
-                    val idx = desc.removePrefix("ep:").toIntOrNull() ?: return@addHyperlinkListener
-                    val ep = detail.entrypointTrace.entrypoints.getOrNull(idx) ?: return@addHyperlinkListener
-                    CodeNavigator.navigateToAbsoluteFileLine(project, ep.filePath, ep.lineNumber1Based)
-                }
-                desc.startsWith("radar:") -> {
-                    val idx = desc.removePrefix("radar:").toIntOrNull() ?: return@addHyperlinkListener
-                    val alert = detail.sideEffectAlerts.getOrNull(idx) ?: return@addHyperlinkListener
-                    navigateToWorkspacePointer(alert.hunkPointer)
-                }
+            if (desc.startsWith("radar:")) {
+                val idx = desc.removePrefix("radar:").toIntOrNull() ?: return@addHyperlinkListener
+                val alert = detail.sideEffectAlerts.getOrNull(idx) ?: return@addHyperlinkListener
+                navigateToWorkspacePointer(alert.hunkPointer)
             }
         }
 
@@ -362,6 +451,7 @@ class FileHistoryDialog(
                     selectedDetail = null
                     rightLoadingPanel.stopLoading()
                     setHeaderSpinnerActive(false)
+                    entrypointsPanel.clear()
                     rationalePane.text = RationaleHtmlRenderer.renderPlaceholder(
                         CodeTrackerI18n.fileHistorySelectCommitHint()
                     )
@@ -458,6 +548,14 @@ class FileHistoryDialog(
     }
 
     private fun loadHistoryAsync() {
+        val reqId = historyRequestSeq.incrementAndGet()
+        val reqRepo = repoRootPath
+        val reqBranch = branch
+        val reqStart = startDate
+        val reqEnd = endDate
+        val reqFile = targetFilePath
+        val reqNoMerges = noMerges
+
         leftLoadingPanel.setLoadingText(CodeTrackerI18n.fileHistoryLoadingLeftText())
         leftLoadingPanel.startLoading()
         setHeaderSpinnerActive(true)
@@ -468,19 +566,19 @@ class FileHistoryDialog(
             try {
                 result = GitRepositoryService.collectFileHistoryWithVersions(
                     project = project,
-                    repoRootPath = repoRootPath,
-                    branch = branch,
-                    startDate = startDate,
-                    endDate = endDate,
-                    filePath = targetFilePath,
-                    noMerges = noMerges
+                    repoRootPath = reqRepo,
+                    branch = reqBranch,
+                    startDate = reqStart,
+                    endDate = reqEnd,
+                    filePath = reqFile,
+                    noMerges = reqNoMerges
                 )
             } catch (e: Exception) {
                 error = e
             }
 
             ApplicationManager.getApplication().invokeLater {
-                if (project.isDisposed || isDisposed) return@invokeLater
+                if (project.isDisposed || isDisposed || historyRequestSeq.get() != reqId) return@invokeLater
                 try {
                     if (error != null) {
                         loadFailed = true
@@ -500,9 +598,11 @@ class FileHistoryDialog(
                         applyHistoryResult(result)
                     }
                 } finally {
-                    leftLoadingPanel.stopLoading()
-                    if (selectedEntry == null) {
-                        setHeaderSpinnerActive(false)
+                    if (historyRequestSeq.get() == reqId) {
+                        leftLoadingPanel.stopLoading()
+                        if (selectedEntry == null) {
+                            setHeaderSpinnerActive(false)
+                        }
                     }
                 }
             }
@@ -537,11 +637,11 @@ class FileHistoryDialog(
 
         if (result.totalCommits == 0) {
             historyTree.emptyText.text = CodeTrackerI18n.fileHistoryEmptyText()
+            entrypointsPanel.clear()
             rationalePane.text = RationaleHtmlRenderer.renderPlaceholder(CodeTrackerI18n.fileHistoryEmptyText())
             return
         }
 
-        // Expand all version group nodes first, then auto-select the latest commit node
         for (groupNode in groupNodes) {
             historyTree.expandPath(TreePath(groupNode.path))
         }
@@ -554,7 +654,7 @@ class FileHistoryDialog(
 
     private fun loadSingleFileDiffOnDemand(entry: FileHistoryCommitEntry) {
         val requestId = detailRequestSeq.incrementAndGet()
-        val cacheKey = entry.commit.hash
+        val cacheKey = "${repoRootPath}::${entry.commit.hash}::${entry.pathAtCommit}"
         val cached = detailCache[cacheKey]
         if (cached != null) {
             rightLoadingPanel.stopLoading()
@@ -563,6 +663,7 @@ class FileHistoryDialog(
             return
         }
 
+        entrypointsPanel.clear()
         rationalePane.text = RationaleHtmlRenderer.renderLoading(entry.commit)
         rationalePane.caretPosition = 0
         pointerRoot.removeAllChildren()
@@ -572,13 +673,14 @@ class FileHistoryDialog(
         rightLoadingPanel.startLoading()
         setHeaderSpinnerActive(true)
 
+        val currentRepo = repoRootPath
         ApplicationManager.getApplication().executeOnPooledThread {
             var detail: CommitDetail? = null
             var error: Exception? = null
             try {
                 detail = RationaleAndCheckEngine.analyzeSingleFileCommitDetail(
                     project = project,
-                    repoRootPath = repoRootPath,
+                    repoRootPath = currentRepo,
                     entry = entry
                 )
                 detailCache[cacheKey] = detail
@@ -592,6 +694,7 @@ class FileHistoryDialog(
 
                 try {
                     if (error != null) {
+                        entrypointsPanel.clear()
                         rationalePane.text = RationaleHtmlRenderer.renderPlaceholder(
                             CodeTrackerI18n.tr(
                                 "단일 파일 Diff 분석 중 오류가 발생했습니다: ${error.message}",
@@ -613,6 +716,7 @@ class FileHistoryDialog(
 
     private fun displayEntryDetail(detail: CommitDetail) {
         selectedDetail = detail
+        entrypointsPanel.updateTrace(detail.entrypointTrace)
         rationalePane.text = RationaleHtmlRenderer.renderCommitDetail(detail)
         rationalePane.caretPosition = 0
 

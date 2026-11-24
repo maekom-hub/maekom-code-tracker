@@ -255,29 +255,15 @@ object CodeTrackerI18n {
         "An error occurred while checking for updates: $detail"
     )
 
-    // ---- v0.2.0: Left Panel View Mode Toggle & 5-Stage Execution Flow ----
+    // ---- v0.2.0: Left Panel View Mode Toggle & 6-Stage Execution Flow ----
     fun viewModeTimeline(): String = tr("커밋/에피소드 타임라인", "Commit/Episode Timeline")
     fun viewModeExecutionFlow(): String = tr("실행 흐름도 재조립", "Execution Flow View")
-    fun flowStage1(): String = tr(
-        "1단계: 진입점 (Controller / Batch / Scheduler / Listener)",
-        "Stage 1: Entrypoints (Controller / Batch / Scheduler / Listener)"
-    )
-    fun flowStage2(): String = tr(
-        "2단계: 비즈니스 로직 (Service / Facade / Component)",
-        "Stage 2: Business Logic (Service / Facade / Component)"
-    )
-    fun flowStage3(): String = tr(
-        "3단계: 데이터 영속성 (Repository / JPA Entity / MyBatis Mapper & XML / QueryDSL)",
-        "Stage 3: Data Persistence (Repository / JPA Entity / MyBatis Mapper & XML / QueryDSL)"
-    )
-    fun flowStage4(): String = tr(
-        "4단계: 외부 시스템 연동 (FeignClient / WebClient / RestTemplate / Kafka / RabbitMQ / 외부 모듈)",
-        "Stage 4: External Integration (FeignClient / WebClient / RestTemplate / Kafka / RabbitMQ / External)"
-    )
-    fun flowStage5(): String = tr(
-        "5단계: 스키마·설정·모델 (DTO / VO / Config / application*.yml / SQL)",
-        "Stage 5: Schema, Config & Model (DTO / VO / Config / application*.yml / SQL)"
-    )
+    fun flowStage1(): String = tr("1단계: 진입/설정", "Stage 1: Entry & Config")
+    fun flowStage2(): String = tr("2단계: API/프레젠테이션", "Stage 2: API & Presentation")
+    fun flowStage3(): String = tr("3단계: 비즈니스 로직", "Stage 3: Business Logic")
+    fun flowStage4(): String = tr("4단계: 데이터 접근", "Stage 4: Data Access")
+    fun flowStage5(): String = tr("5단계: 스키마/모델", "Stage 5: Schema & Model")
+    fun flowStage6(): String = tr("테스트 및 문서", "Tests & Docs")
     fun flowModifiedBadge(count: Int, added: Int, deleted: Int): String = tr(
         "${count}회 수정 (+$added/-$deleted)",
         "$count edits (+$added/-$deleted)"
@@ -297,6 +283,9 @@ object CodeTrackerI18n {
 
     // ---- v0.2.0: Entrypoint Impact Tracer ----
     fun impactedEntrypointsTitle(): String = tr("영향받는 엔트리포인트 (클릭: 코드 점프)", "Impacted Entrypoints (Click to Jump)")
+    fun entrypointTooltipCallChain(): String = tr("호출 체인", "Call Chain")
+    fun entrypointTooltipReason(): String = tr("영향 요약", "Impact Reason")
+    fun entrypointTooltipJumpHint(): String = tr("클릭하면 해당 메서드로 바로 이동합니다.", "Click to jump directly to this entrypoint method.")
     fun entrypointDumbModeNotice(): String = tr(
         "IDE 인덱싱 진행 중(Dumb Mode)이어서 PSI 엔트리포인트 역추적을 생략했습니다. 인덱싱 완료 후 커밋을 다시 선택해 주세요.",
         "IDE indexing is in progress (Dumb Mode). Reselect the commit after indexing completes to trace PSI entrypoints."

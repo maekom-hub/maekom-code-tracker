@@ -43,6 +43,7 @@ import com.maekom.codetracker.model.CommitSummary
 import com.maekom.codetracker.model.FileDiffDetail
 import com.maekom.codetracker.model.FlowMergedFile
 import com.maekom.codetracker.model.FlowStageGroup
+import com.maekom.codetracker.model.FlowSubGroup
 import com.maekom.codetracker.model.LayerFilterOption
 import com.maekom.codetracker.model.MergedFileAnalysisDetail
 import com.maekom.codetracker.model.PrimaryLayer
@@ -169,7 +170,8 @@ class CodeTrackerPanel(
     private val flowModel = DefaultTreeModel(flowRoot)
     private val flowTree = Tree(flowModel)
 
-    // Right Top Panel: Rationale & Architecture Check
+    // Right Top Panel: Entrypoints line-by-line section + Rationale & Architecture Check
+    private val entrypointsPanel = EntrypointsSectionPanel(project)
     private val rationalePane = JEditorPane().apply {
         isEditable = false
         font = UIManager.getFont("Tree.font") ?: JBUI.Fonts.label()
@@ -207,6 +209,7 @@ class CodeTrackerPanel(
     private data class EpisodeNodeData(val episode: WorkEpisode)
     private data class CommitNodeData(val commit: CommitSummary, val episode: WorkEpisode)
     private data class FlowStageNodeData(val group: FlowStageGroup)
+    private data class FlowSubGroupNodeData(val subGroup: FlowSubGroup)
     private data class FlowMergedFileNodeData(val mergedFile: FlowMergedFile)
     private data class LayerGroupNodeData(val layer: PrimaryLayer, val fileCount: Int)
     private data class MergedCommitGroupNodeData(val commit: CommitSummary, val fileDetail: FileDiffDetail)
@@ -350,6 +353,7 @@ class CodeTrackerPanel(
         timelineTree.repaint()
         flowTree.revalidate()
         flowTree.repaint()
+        entrypointsPanel.refreshLocalization()
 
         val merged = selectedMergedDetail
         val detail = selectedDetail
@@ -401,11 +405,15 @@ class CodeTrackerPanel(
             }
         })
 
-        // Right vertical splitter: Rationale (Top) + Smart Pointers (Bottom)
+        // Right vertical splitter: Rationale (Top: Entrypoints + Rationale HTML) + Smart Pointers (Bottom)
+        val rightTopContent = JPanel(BorderLayout()).apply {
+            add(entrypointsPanel, BorderLayout.NORTH)
+            add(JBScrollPane(rationalePane), BorderLayout.CENTER)
+        }
         val rightTopPanel = JPanel(BorderLayout()).apply {
             border = JBUI.Borders.customLine(JBColor.border(), 1)
             add(rightTopHeaderLabel, BorderLayout.NORTH)
-            add(JBScrollPane(rationalePane), BorderLayout.CENTER)
+            add(rightTopContent, BorderLayout.CENTER)
         }
 
         val rightBottomPanel = JPanel(BorderLayout()).apply {
@@ -754,7 +762,7 @@ class CodeTrackerPanel(
             ?: parseDateRangeLenient()
         val noMerges = currentResult?.filter?.excludeMerges ?: excludeMergesCheckBox.isSelected
 
-        val dialog = FileHistoryDialog(
+        FileHistoryDialog.showOrUpdate(
             project = project,
             repoRootPath = repo.rootPath,
             branch = branch,
@@ -763,7 +771,6 @@ class CodeTrackerPanel(
             targetFilePath = filePath,
             noMerges = noMerges
         )
-        dialog.show()
     }
 
     private fun registerRepositoryLifecycleHooks() {
@@ -1092,6 +1099,7 @@ class CodeTrackerPanel(
                         }
 
                         applyClientSideFilter()
+                        entrypointsPanel.clear()
                         rationalePane.text = RationaleHtmlRenderer.renderPlaceholder(
                             if (rawCommits.isEmpty()) {
                                 CodeTrackerI18n.rationaleNoCommitsPlaceholder()
@@ -1153,12 +1161,17 @@ class CodeTrackerPanel(
         flowRoot.removeAllChildren()
         for (group in groups) {
             val stageNode = DefaultMutableTreeNode(FlowStageNodeData(group))
-            for (mf in group.files) {
-                stageNode.add(DefaultMutableTreeNode(FlowMergedFileNodeData(mf)))
+            for (subGroup in group.subGroups) {
+                val subNode = DefaultMutableTreeNode(FlowSubGroupNodeData(subGroup))
+                for (mf in subGroup.files) {
+                    subNode.add(DefaultMutableTreeNode(FlowMergedFileNodeData(mf)))
+                }
+                stageNode.add(subNode)
             }
             flowRoot.add(stageNode)
         }
         flowModel.reload()
+        // Expand every level ([Stage] -> [Sub-Depth] -> [Files]) by default
         var row = 0
         while (row < flowTree.rowCount) {
             flowTree.expandRow(row)
@@ -1180,6 +1193,7 @@ class CodeTrackerPanel(
 
         selectedDetail = null
         selectedMergedDetail = null
+        entrypointsPanel.clear()
         rationalePane.text = RationaleHtmlRenderer.renderPlaceholder(
             CodeTrackerI18n.flowLoadingMergedFile(mergedFile.fileName, mergedFile.commits.size)
         )
@@ -1209,6 +1223,7 @@ class CodeTrackerPanel(
         selectedDetail = null
         selectedMergedDetail = merged
         selectedCommit = merged.commitSections.firstOrNull()?.commit
+        entrypointsPanel.updateTrace(merged.entrypointTrace)
         rationalePane.text = RationaleHtmlRenderer.renderMergedFileDetail(merged)
         rationalePane.caretPosition = 0
         rebuildPointerTreeForMergedFile(merged)
@@ -1321,6 +1336,7 @@ class CodeTrackerPanel(
             return
         }
 
+        entrypointsPanel.clear()
         rationalePane.text = RationaleHtmlRenderer.renderLoading(commit)
         rationalePane.caretPosition = 0
         clearPointerTree()
@@ -1371,6 +1387,7 @@ class CodeTrackerPanel(
     private fun displayCommitDetail(detail: CommitDetail) {
         selectedMergedDetail = null
         selectedDetail = detail
+        entrypointsPanel.updateTrace(detail.entrypointTrace)
         rationalePane.text = RationaleHtmlRenderer.renderCommitDetail(detail)
         rationalePane.caretPosition = 0
         rebuildPointerTree(detail)
@@ -1716,7 +1733,7 @@ class CodeTrackerPanel(
         }
     }
 
-    // Custom renderer for 5-Stage Execution Flow Tree
+    // Custom renderer for 6-Stage + 2-Level Sub-Depth Execution Flow Tree
     private inner class ExecutionFlowTreeCellRenderer : ColoredTreeCellRenderer() {
         override fun customizeCellRenderer(
             tree: JTree,
@@ -1732,7 +1749,13 @@ class CodeTrackerPanel(
                 is FlowStageNodeData -> {
                     icon = AllIcons.Nodes.Module
                     append(obj.group.stage.localizedTitle(), SimpleTextAttributes.REGULAR_BOLD_ATTRIBUTES)
-                    append(" (${CodeTrackerI18n.filesCountUnit(obj.group.files.size)})", SimpleTextAttributes.GRAYED_ATTRIBUTES)
+                    append(" (${CodeTrackerI18n.filesCountUnit(obj.group.totalFileCount)})", SimpleTextAttributes.GRAYED_ATTRIBUTES)
+                }
+
+                is FlowSubGroupNodeData -> {
+                    icon = AllIcons.Nodes.Package
+                    append(obj.subGroup.subCategory.displayLabel, SimpleTextAttributes.REGULAR_BOLD_ATTRIBUTES)
+                    append(" (${obj.subGroup.files.size})", SimpleTextAttributes.GRAYED_ATTRIBUTES)
                 }
 
                 is FlowMergedFileNodeData -> {

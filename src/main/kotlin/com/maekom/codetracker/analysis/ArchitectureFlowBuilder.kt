@@ -2,39 +2,31 @@ package com.maekom.codetracker.analysis
 
 import com.maekom.codetracker.model.CommitSummary
 import com.maekom.codetracker.model.ExecutionFlowStage
+import com.maekom.codetracker.model.ExecutionFlowSubCategory
 import com.maekom.codetracker.model.FlowMergedFile
 import com.maekom.codetracker.model.FlowStageGroup
+import com.maekom.codetracker.model.FlowSubGroup
 import com.maekom.codetracker.model.PrimaryLayer
 
 /**
- * Zero-latency 5-stage architectural execution flow assembler built solely from
- * Stage 1 in-memory CommitSummary & FileSummary metadata (zero extra git calls).
- * Merges repeatedly modified files across commits and aggregates modification counts + line stats.
+ * Zero-latency 6-stage + 2-level sub-depth architectural execution flow assembler built solely
+ * from Stage 1 in-memory CommitSummary & FileSummary metadata.
+ *
+ * Priority rules:
+ * 1) Test code (src/test/, /test/) and documentation (.md, .adoc, .rst, .txt docs) are isolated
+ *    first into the final stage (STAGE_6_TEST_DOCS).
+ * 2) Class/filename suffix rules take strict priority over package names (e.g. `domain`, `model`)
+ *    so `*Repository`/`*Mapper`/`*Dao`, `*Service`/`*ServiceImpl`/`*Manager`/`*UseCase`, and
+ *    `*Controller`/`*RestController`/`*Router`/`*Handler` are never misclassified into Schema/Model.
+ * 3) Every stage organizes files into kind-based sub-depth categories (`Stage -> SubCategory -> Files`).
  */
 object ArchitectureFlowBuilder {
 
-    private val ENTRYPOINT_TOKENS = listOf(
-        "controller", "endpoint", "resolver", "batch", "job", "step", "tasklet",
-        "scheduler", "listener", "consumer", "webhook"
-    )
-    private val EXTERNAL_TOKENS = listOf(
-        "feign", "client", "webclient", "resttemplate", "restclient", "external",
-        "legacy", "adapter", "integration", "kafka", "rabbit", "amqp", "producer", "gateway", "proxy"
-    )
-    private val PERSISTENCE_TOKENS = listOf(
-        "repository", "entity", "mapper", "dao", "querydsl", "mongo", "document", "redis", "cache", "store"
-    )
-    private val BUSINESS_TOKENS = listOf(
-        "service", "usecase", "facade", "manager", "component", "handler", "processor", "domain", "biz"
-    )
-    private val SCHEMA_CONFIG_MODEL_TOKENS = listOf(
-        "dto", "vo", "request", "response", "model", "config", "security", "filter", "interceptor", "migration"
-    )
+    private val DOC_EXTENSIONS = setOf(".md", ".mdx", ".adoc", ".rst")
 
     fun buildExecutionFlow(commits: List<CommitSummary>): List<FlowStageGroup> {
         if (commits.isEmpty()) return emptyList()
 
-        // Merge identical file paths across all commits in the filtered set
         data class MutableAgg(
             val path: String,
             val primaryLayer: PrimaryLayer,
@@ -60,11 +52,12 @@ object ArchitectureFlowBuilder {
         }
 
         val mergedFiles = aggByPath.values.map { agg ->
-            val stage = classifyExecutionStage(agg.path, agg.primaryLayer)
+            val subCategory = classifySubCategory(agg.path, agg.primaryLayer)
             FlowMergedFile(
                 path = agg.path,
                 fileName = agg.path.substringAfterLast('/'),
-                stage = stage,
+                stage = subCategory.stage,
+                subCategory = subCategory,
                 primaryLayer = agg.primaryLayer,
                 modifyCount = agg.modifyCount,
                 totalAddedLines = agg.addedLines,
@@ -73,81 +66,199 @@ object ArchitectureFlowBuilder {
             )
         }
 
-        val grouped = mergedFiles.groupBy { it.stage }
+        val byStage = mergedFiles.groupBy { it.stage }
         return ExecutionFlowStage.entries
             .sortedBy { it.order }
             .mapNotNull { stage ->
-                val filesInStage = grouped[stage] ?: return@mapNotNull null
-                val sortedFiles = filesInStage.sortedWith(
-                    compareByDescending<FlowMergedFile> { it.modifyCount }
-                        .thenByDescending { it.totalAddedLines + it.totalDeletedLines }
-                        .thenBy { it.fileName }
-                )
-                FlowStageGroup(stage = stage, files = sortedFiles)
+                val stageFiles = byStage[stage] ?: return@mapNotNull null
+                val bySub = stageFiles.groupBy { it.subCategory }
+                val subGroups = ExecutionFlowSubCategory.entries
+                    .filter { it.stage == stage }
+                    .sortedBy { it.order }
+                    .mapNotNull { sub ->
+                        val files = bySub[sub] ?: return@mapNotNull null
+                        val sorted = files.sortedWith(
+                            compareByDescending<FlowMergedFile> { it.modifyCount }
+                                .thenByDescending { it.totalAddedLines + it.totalDeletedLines }
+                                .thenBy { it.fileName }
+                        )
+                        FlowSubGroup(subCategory = sub, files = sorted)
+                    }
+                if (subGroups.isEmpty()) null else FlowStageGroup(stage = stage, subGroups = subGroups)
             }
     }
 
-    internal fun classifyExecutionStage(rawPath: String, primaryLayer: PrimaryLayer): ExecutionFlowStage {
-        val normalized = rawPath.replace('\\', '/').lowercase()
+    internal fun classifySubCategory(rawPath: String, primaryLayer: PrimaryLayer): ExecutionFlowSubCategory {
+        val normalized = rawPath.replace('\\', '/').trim()
+        val lowerPath = normalized.lowercase()
         val fileName = normalized.substringAfterLast('/')
+        val lowerFileName = fileName.lowercase()
         val baseName = fileName.substringBeforeLast('.')
+        val lowerBase = baseName.lowercase()
 
-        // Explicit schema/config/sql/docs files -> Stage 5
-        if (fileName.endsWith(".sql") ||
-            fileName.endsWith(".md") ||
-            fileName == "pom.xml" ||
-            fileName.startsWith("build.gradle") ||
-            fileName.startsWith("settings.gradle") ||
-            (fileName.startsWith("application") &&
-                (fileName.endsWith(".yml") || fileName.endsWith(".yaml") || fileName.endsWith(".properties")))
+        // =========================================================================
+        // PRIORITY 1: Isolate Test Code & Documentation into Final Stage (Stage 6)
+        // =========================================================================
+        if (isTestPath(lowerPath, lowerBase)) {
+            return ExecutionFlowSubCategory.TEST_CODE
+        }
+        if (isDocumentationFile(lowerPath, lowerFileName)) {
+            return ExecutionFlowSubCategory.DOCUMENTATION
+        }
+
+        // =========================================================================
+        // PRIORITY 2: Strict Class/Filename Suffix Rules (overrides `domain`/`model` package names)
+        // =========================================================================
+
+        // 2-A. Data Access (Stage 4): *Repository, *Mapper, *Dao, *Query, *.sql, *Mapper.xml
+        if (lowerFileName.endsWith(".sql") ||
+            lowerFileName.endsWith("mapper.xml") ||
+            (lowerFileName.endsWith(".xml") && (lowerPath.contains("mapper") || lowerPath.contains("mybatis") || lowerPath.contains("query")))
         ) {
-            return ExecutionFlowStage.STAGE_5_SCHEMA_CONFIG_MODEL
+            return ExecutionFlowSubCategory.MAPPER_QUERY
+        }
+        if (endsWithAny(lowerBase, "repository", "repositoryimpl", "repositorycustom", "dao", "daoimpl")) {
+            return ExecutionFlowSubCategory.REPOSITORY_DAO
+        }
+        if (endsWithAny(lowerBase, "mapper", "mapperimpl", "querydsl", "query", "queryrepository")) {
+            return ExecutionFlowSubCategory.MAPPER_QUERY
         }
 
-        // MyBatis Mapper XML -> Stage 3
-        if (fileName.endsWith("mapper.xml") || (fileName.endsWith(".xml") && (normalized.contains("mapper") || normalized.contains("mybatis")))) {
-            return ExecutionFlowStage.STAGE_3_DATA_PERSISTENCE
+        // 2-B. Business Logic (Stage 3): *Service, *ServiceImpl, *Manager, *UseCase
+        if (endsWithAny(lowerBase, "serviceimpl", "usecaseimpl", "facadeimpl", "managerimpl")) {
+            return ExecutionFlowSubCategory.SERVICE_IMPL
+        }
+        if (endsWithAny(lowerBase, "service", "usecase")) {
+            return ExecutionFlowSubCategory.SERVICE_INTERFACE
+        }
+        if (endsWithAny(
+                lowerBase,
+                "manager", "component", "facade", "client", "feignclient", "feign",
+                "adapter", "gateway", "integration", "processor", "helper", "executor"
+            )
+        ) {
+            return ExecutionFlowSubCategory.COMPONENT_MANAGER
         }
 
-        // DTO / Request / Response / VO -> Stage 5 (even if primaryLayer was Controller/API)
-        if (SCHEMA_CONFIG_MODEL_TOKENS.any { baseName.contains(it) }) {
-            return ExecutionFlowStage.STAGE_5_SCHEMA_CONFIG_MODEL
+        // 2-C. API / Presentation (Stage 2): *Controller, *RestController, *Router, *Handler, *Resolver, *Endpoint
+        if (endsWithAny(lowerBase, "restcontroller", "controller", "endpoint", "resource", "api")) {
+            return ExecutionFlowSubCategory.CONTROLLER_ENDPOINT
+        }
+        if (endsWithAny(lowerBase, "router", "handler", "resolver", "listener", "consumer", "scheduler", "job", "step", "tasklet")) {
+            return ExecutionFlowSubCategory.HANDLER_RESOLVER
         }
 
-        // Filename-level precision matching across stages 1..4
-        if (ENTRYPOINT_TOKENS.any { baseName.contains(it) }) {
-            return ExecutionFlowStage.STAGE_1_ENTRYPOINT
+        // 2-D. Entry / Config (Stage 1): Application, Filter/Interceptor/AOP, Config/Properties
+        if (endsWithAny(lowerBase, "application", "bootstrap", "starter") &&
+            (lowerFileName.endsWith(".java") || lowerFileName.endsWith(".kt"))
+        ) {
+            return ExecutionFlowSubCategory.APPLICATION
         }
-        if (EXTERNAL_TOKENS.any { baseName.contains(it) }) {
-            return ExecutionFlowStage.STAGE_4_EXTERNAL_INTEGRATION
+        if (endsWithAny(lowerBase, "filter", "interceptor", "aspect", "advice", "aop")) {
+            return ExecutionFlowSubCategory.FILTER_INTERCEPTOR_AOP
         }
-        if (PERSISTENCE_TOKENS.any { baseName.contains(it) }) {
-            return ExecutionFlowStage.STAGE_3_DATA_PERSISTENCE
-        }
-        if (BUSINESS_TOKENS.any { baseName.contains(it) }) {
-            return ExecutionFlowStage.STAGE_2_BUSINESS_LOGIC
+        if (isConfigOrPropertiesFile(lowerFileName, lowerBase)) {
+            return ExecutionFlowSubCategory.CONFIG_PROPERTIES
         }
 
-        // Path-level & PrimaryLayer fallback
-        return when (primaryLayer) {
-            PrimaryLayer.CONTROLLER_API -> ExecutionFlowStage.STAGE_1_ENTRYPOINT
-            PrimaryLayer.SERVICE -> ExecutionFlowStage.STAGE_2_BUSINESS_LOGIC
-            PrimaryLayer.RDB_JPA_MYBATIS,
-            PrimaryLayer.NOSQL_MONGO,
-            PrimaryLayer.CACHE_REDIS -> ExecutionFlowStage.STAGE_3_DATA_PERSISTENCE
-            PrimaryLayer.EXTERNAL_MSA_CLIENT -> ExecutionFlowStage.STAGE_4_EXTERNAL_INTEGRATION
-            PrimaryLayer.CONFIG_SECURITY,
-            PrimaryLayer.DOCS_MD,
-            PrimaryLayer.TEST,
-            PrimaryLayer.ETC -> {
-                when {
-                    ENTRYPOINT_TOKENS.any { normalized.contains("/$it/") } -> ExecutionFlowStage.STAGE_1_ENTRYPOINT
-                    EXTERNAL_TOKENS.any { normalized.contains("/$it/") } -> ExecutionFlowStage.STAGE_4_EXTERNAL_INTEGRATION
-                    PERSISTENCE_TOKENS.any { normalized.contains("/$it/") } -> ExecutionFlowStage.STAGE_3_DATA_PERSISTENCE
-                    BUSINESS_TOKENS.any { normalized.contains("/$it/") } -> ExecutionFlowStage.STAGE_2_BUSINESS_LOGIC
-                    else -> ExecutionFlowStage.STAGE_5_SCHEMA_CONFIG_MODEL
-                }
-            }
+        // 2-E. Schema / Model (Stage 5): Request, Response, Entity/Domain, Common DTO/VO
+        if (endsWithAny(lowerBase, "request", "req", "requestdto", "reqdto", "command", "param", "params")) {
+            return ExecutionFlowSubCategory.REQUEST
         }
+        if (endsWithAny(lowerBase, "response", "res", "responsedto", "resdto", "resultdto")) {
+            return ExecutionFlowSubCategory.RESPONSE
+        }
+        if (endsWithAny(lowerBase, "entity", "document", "domain", "model", "table", "schema")) {
+            return ExecutionFlowSubCategory.ENTITY_DOMAIN
+        }
+        if (endsWithAny(lowerBase, "dto", "vo", "payload", "event", "message", "projection")) {
+            return ExecutionFlowSubCategory.COMMON_DTO_VO
+        }
+
+        // =========================================================================
+        // PRIORITY 3: Package/Path & PrimaryLayer Fallback
+        // =========================================================================
+        val dirPath = lowerPath.substringBeforeLast('/', "")
+        return when {
+            containsSegment(dirPath, "filter", "interceptor", "aop", "aspect", "security") ->
+                ExecutionFlowSubCategory.FILTER_INTERCEPTOR_AOP
+            containsSegment(dirPath, "config", "configuration", "properties") ->
+                ExecutionFlowSubCategory.CONFIG_PROPERTIES
+            containsSegment(dirPath, "controller", "endpoint", "api") ->
+                ExecutionFlowSubCategory.CONTROLLER_ENDPOINT
+            containsSegment(dirPath, "handler", "resolver", "router", "listener", "scheduler", "batch") ->
+                ExecutionFlowSubCategory.HANDLER_RESOLVER
+            containsSegment(dirPath, "repository", "dao") ->
+                ExecutionFlowSubCategory.REPOSITORY_DAO
+            containsSegment(dirPath, "mapper", "mybatis", "query", "querydsl") ->
+                ExecutionFlowSubCategory.MAPPER_QUERY
+            containsSegment(dirPath, "service", "usecase") ->
+                ExecutionFlowSubCategory.COMPONENT_MANAGER
+            containsSegment(dirPath, "client", "feign", "external", "legacy", "adapter", "integration") ->
+                ExecutionFlowSubCategory.COMPONENT_MANAGER
+            containsSegment(dirPath, "request", "req") ->
+                ExecutionFlowSubCategory.REQUEST
+            containsSegment(dirPath, "response", "res") ->
+                ExecutionFlowSubCategory.RESPONSE
+            containsSegment(dirPath, "entity", "document", "domain", "model") ->
+                ExecutionFlowSubCategory.ENTITY_DOMAIN
+            containsSegment(dirPath, "dto", "vo") ->
+                ExecutionFlowSubCategory.COMMON_DTO_VO
+            primaryLayer == PrimaryLayer.CONFIG_SECURITY -> ExecutionFlowSubCategory.CONFIG_PROPERTIES
+            primaryLayer == PrimaryLayer.CONTROLLER_API -> ExecutionFlowSubCategory.CONTROLLER_ENDPOINT
+            primaryLayer == PrimaryLayer.SERVICE -> ExecutionFlowSubCategory.COMPONENT_MANAGER
+            primaryLayer == PrimaryLayer.EXTERNAL_MSA_CLIENT -> ExecutionFlowSubCategory.COMPONENT_MANAGER
+            primaryLayer == PrimaryLayer.RDB_JPA_MYBATIS ||
+                primaryLayer == PrimaryLayer.NOSQL_MONGO ||
+                primaryLayer == PrimaryLayer.CACHE_REDIS -> ExecutionFlowSubCategory.REPOSITORY_DAO
+            else -> ExecutionFlowSubCategory.COMMON_DTO_VO
+        }
+    }
+
+    private fun isTestPath(lowerPath: String, lowerBase: String): Boolean {
+        if (lowerPath.contains("src/test/") ||
+            lowerPath.contains("/test/") ||
+            lowerPath.startsWith("test/") ||
+            lowerPath.contains("/tests/") ||
+            lowerPath.startsWith("tests/")
+        ) {
+            return true
+        }
+        return endsWithAny(lowerBase, "test", "tests", "spec", "it")
+    }
+
+    private fun isDocumentationFile(lowerPath: String, lowerFileName: String): Boolean {
+        if (DOC_EXTENSIONS.any { lowerFileName.endsWith(it) }) return true
+        if (lowerFileName.startsWith("readme") || lowerFileName.startsWith("changelog") || lowerFileName.startsWith("license")) {
+            return true
+        }
+        if (lowerFileName.endsWith(".txt") && (lowerPath.contains("docs/") || lowerPath.contains("/doc/"))) {
+            return true
+        }
+        return false
+    }
+
+    private fun isConfigOrPropertiesFile(lowerFileName: String, lowerBase: String): Boolean {
+        if (lowerFileName == "pom.xml" ||
+            lowerFileName.startsWith("build.gradle") ||
+            lowerFileName.startsWith("settings.gradle") ||
+            lowerFileName == "gradle.properties" ||
+            lowerFileName.endsWith(".yml") ||
+            lowerFileName.endsWith(".yaml") ||
+            lowerFileName.endsWith(".properties")
+        ) {
+            return true
+        }
+        return endsWithAny(lowerBase, "config", "configuration", "properties", "props", "settings")
+    }
+
+    private fun endsWithAny(text: String, vararg suffixes: String): Boolean {
+        return suffixes.any { text.endsWith(it) }
+    }
+
+    private fun containsSegment(dirPath: String, vararg segments: String): Boolean {
+        if (dirPath.isBlank()) return false
+        val tokens = dirPath.split('/')
+        return segments.any { seg -> tokens.any { it == seg } }
     }
 }

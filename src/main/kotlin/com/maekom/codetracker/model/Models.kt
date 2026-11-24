@@ -235,8 +235,13 @@ data class EntrypointTarget(
     val lineNumber1Based: Int,
     val className: String,
     val methodName: String,
-    val hopDepth: Int
-)
+    val hopDepth: Int,
+    val impactReasonKo: String = "",
+    val impactReasonEn: String = "",
+    val callChain: List<String> = emptyList()
+) {
+    fun localizedImpactReason(): String = CodeTrackerI18n.tr(impactReasonKo, impactReasonEn)
+}
 
 data class EntrypointTraceResult(
     val entrypoints: List<EntrypointTarget> = emptyList(),
@@ -282,25 +287,62 @@ data class SideEffectAlert(
 }
 
 enum class ExecutionFlowStage(val order: Int) {
-    STAGE_1_ENTRYPOINT(1),
-    STAGE_2_BUSINESS_LOGIC(2),
-    STAGE_3_DATA_PERSISTENCE(3),
-    STAGE_4_EXTERNAL_INTEGRATION(4),
-    STAGE_5_SCHEMA_CONFIG_MODEL(5);
+    STAGE_1_ENTRY_CONFIG(1),
+    STAGE_2_API_PRESENTATION(2),
+    STAGE_3_BUSINESS_LOGIC(3),
+    STAGE_4_DATA_ACCESS(4),
+    STAGE_5_SCHEMA_MODEL(5),
+    STAGE_6_TEST_DOCS(6);
 
     fun localizedTitle(): String = when (this) {
-        STAGE_1_ENTRYPOINT -> CodeTrackerI18n.flowStage1()
-        STAGE_2_BUSINESS_LOGIC -> CodeTrackerI18n.flowStage2()
-        STAGE_3_DATA_PERSISTENCE -> CodeTrackerI18n.flowStage3()
-        STAGE_4_EXTERNAL_INTEGRATION -> CodeTrackerI18n.flowStage4()
-        STAGE_5_SCHEMA_CONFIG_MODEL -> CodeTrackerI18n.flowStage5()
+        STAGE_1_ENTRY_CONFIG -> CodeTrackerI18n.flowStage1()
+        STAGE_2_API_PRESENTATION -> CodeTrackerI18n.flowStage2()
+        STAGE_3_BUSINESS_LOGIC -> CodeTrackerI18n.flowStage3()
+        STAGE_4_DATA_ACCESS -> CodeTrackerI18n.flowStage4()
+        STAGE_5_SCHEMA_MODEL -> CodeTrackerI18n.flowStage5()
+        STAGE_6_TEST_DOCS -> CodeTrackerI18n.flowStage6()
     }
+}
+
+enum class ExecutionFlowSubCategory(
+    val stage: ExecutionFlowStage,
+    val order: Int,
+    val displayLabel: String
+) {
+    // Stage 1: Entry / Config
+    CONFIG_PROPERTIES(ExecutionFlowStage.STAGE_1_ENTRY_CONFIG, 1, "Config / Properties"),
+    FILTER_INTERCEPTOR_AOP(ExecutionFlowStage.STAGE_1_ENTRY_CONFIG, 2, "Filter / Interceptor / AOP"),
+    APPLICATION(ExecutionFlowStage.STAGE_1_ENTRY_CONFIG, 3, "Application"),
+
+    // Stage 2: API / Presentation
+    CONTROLLER_ENDPOINT(ExecutionFlowStage.STAGE_2_API_PRESENTATION, 1, "Controller / Endpoint"),
+    HANDLER_RESOLVER(ExecutionFlowStage.STAGE_2_API_PRESENTATION, 2, "Handler / Resolver"),
+
+    // Stage 3: Business Logic
+    SERVICE_INTERFACE(ExecutionFlowStage.STAGE_3_BUSINESS_LOGIC, 1, "Service Interface"),
+    SERVICE_IMPL(ExecutionFlowStage.STAGE_3_BUSINESS_LOGIC, 2, "Service Implementation (*Impl)"),
+    COMPONENT_MANAGER(ExecutionFlowStage.STAGE_3_BUSINESS_LOGIC, 3, "Component / Manager"),
+
+    // Stage 4: Data Access
+    REPOSITORY_DAO(ExecutionFlowStage.STAGE_4_DATA_ACCESS, 1, "Repository / DAO"),
+    MAPPER_QUERY(ExecutionFlowStage.STAGE_4_DATA_ACCESS, 2, "Mapper / Query"),
+
+    // Stage 5: Schema / Model
+    REQUEST(ExecutionFlowStage.STAGE_5_SCHEMA_MODEL, 1, "Request"),
+    RESPONSE(ExecutionFlowStage.STAGE_5_SCHEMA_MODEL, 2, "Response"),
+    ENTITY_DOMAIN(ExecutionFlowStage.STAGE_5_SCHEMA_MODEL, 3, "Entity / Domain"),
+    COMMON_DTO_VO(ExecutionFlowStage.STAGE_5_SCHEMA_MODEL, 4, "Common DTO / VO"),
+
+    // Stage 6 (Last): Tests & Docs
+    TEST_CODE(ExecutionFlowStage.STAGE_6_TEST_DOCS, 1, "Test Code"),
+    DOCUMENTATION(ExecutionFlowStage.STAGE_6_TEST_DOCS, 2, "Documentation (.md)");
 }
 
 data class FlowMergedFile(
     val path: String,
     val fileName: String,
     val stage: ExecutionFlowStage,
+    val subCategory: ExecutionFlowSubCategory,
     val primaryLayer: PrimaryLayer,
     val modifyCount: Int,
     val totalAddedLines: Int,
@@ -308,10 +350,18 @@ data class FlowMergedFile(
     val commits: List<CommitSummary>
 )
 
-data class FlowStageGroup(
-    val stage: ExecutionFlowStage,
+data class FlowSubGroup(
+    val subCategory: ExecutionFlowSubCategory,
     val files: List<FlowMergedFile>
 )
+
+data class FlowStageGroup(
+    val stage: ExecutionFlowStage,
+    val subGroups: List<FlowSubGroup>
+) {
+    val totalFileCount: Int
+        get() = subGroups.sumOf { it.files.size }
+}
 
 data class MergedFileCommitSection(
     val commit: CommitSummary,
