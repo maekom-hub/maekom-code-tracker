@@ -6,6 +6,7 @@ import com.maekom.codetracker.model.CheckBadge
 import com.maekom.codetracker.model.CommitDetail
 import com.maekom.codetracker.model.CommitSummary
 import com.maekom.codetracker.model.FileDiffDetail
+import com.maekom.codetracker.model.FileHistoryCommitEntry
 import com.maekom.codetracker.model.PrimaryLayer
 import com.maekom.codetracker.model.StackTag
 import com.maekom.codetracker.model.WorkEpisode
@@ -76,6 +77,45 @@ object RationaleAndCheckEngine {
             checkBadges = badges,
             crossLayerFlowSummary = flowSummary,
             matchedMarkdownSections = matchedMd,
+            apiHints = apiHints,
+            addedComments = addedComments
+        )
+    }
+
+    /**
+     * On-demand single-file commit analysis for FileHistoryDialog.
+     * Parses `git show --unified=3 <hash> -- <pathAtCommit>` cleanly.
+     */
+    fun analyzeSingleFileCommitDetail(
+        project: Project,
+        repoRootPath: String,
+        entry: FileHistoryCommitEntry
+    ): CommitDetail {
+        val fileSummary = entry.toFileSummary()
+        val rawDiff = GitRepositoryService.fetchSingleFileShowDiff(
+            project = project,
+            repoRootPath = repoRootPath,
+            commitHash = entry.commit.hash,
+            pathAtCommit = entry.pathAtCommit
+        )
+        val fileDetails = UnifiedDiffParser.parseDiff(rawDiff, listOf(fileSummary))
+        val issueTags = extractIssueTags("${entry.commit.subject}\n${entry.commit.body}")
+        val addedComments = fileDetails.flatMap { fd ->
+            fd.addedComments.map { comment -> fd.summary.fileName to comment }
+        }.take(20)
+        val apiHints = fileDetails.flatMap { it.apiHints }
+        val allStackTags = fileDetails.flatMap { it.stackTags }.toCollection(linkedSetOf())
+        val badges = detectCheckBadges(fileDetails, allStackTags)
+        val flowSummary = buildCrossLayerFlowSummary(entry.commit, fileDetails, allStackTags)
+
+        return CommitDetail(
+            summary = entry.commit,
+            fileDetails = fileDetails,
+            issueTags = issueTags,
+            allStackTags = allStackTags,
+            checkBadges = badges,
+            crossLayerFlowSummary = flowSummary,
+            matchedMarkdownSections = emptyList(),
             apiHints = apiHints,
             addedComments = addedComments
         )

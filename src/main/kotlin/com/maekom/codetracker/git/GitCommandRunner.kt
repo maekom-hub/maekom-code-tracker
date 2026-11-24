@@ -20,7 +20,7 @@ data class GitCommandOutput(
  */
 object GitCommandRunner {
 
-    private val ALLOWED_SUBCOMMANDS = setOf("log", "show", "branch", "rev-parse", "cat-file")
+    private val ALLOWED_SUBCOMMANDS = setOf("log", "show", "branch", "rev-parse", "cat-file", "show-ref")
     private const val DEFAULT_TIMEOUT_SECONDS = 30L
     private const val DEFAULT_MAX_OUTPUT_BYTES = 16 * 1024 * 1024 // 16MB global ceiling
 

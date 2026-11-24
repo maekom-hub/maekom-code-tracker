@@ -2,6 +2,7 @@ package com.maekom.codetracker.ui
 
 import com.intellij.icons.AllIcons
 import com.intellij.ide.plugins.PluginManagerConfigurable
+import com.intellij.openapi.Disposable
 import com.intellij.openapi.application.ApplicationManager
 import com.intellij.openapi.ide.CopyPasteManager
 import com.intellij.openapi.options.ShowSettingsUtil
@@ -9,8 +10,12 @@ import com.intellij.openapi.progress.ProgressIndicator
 import com.intellij.openapi.progress.ProgressManager
 import com.intellij.openapi.progress.Task
 import com.intellij.openapi.project.Project
+import com.intellij.openapi.startup.StartupManager
 import com.intellij.openapi.ui.ComboBox
 import com.intellij.openapi.ui.Messages
+import com.intellij.openapi.util.Disposer
+import com.intellij.openapi.vcs.ProjectLevelVcsManager
+import com.intellij.openapi.vcs.VcsListener
 import com.intellij.ui.ColoredTreeCellRenderer
 import com.intellij.ui.JBColor
 import com.intellij.ui.JBSplitter
@@ -56,6 +61,7 @@ import java.time.LocalDate
 import java.time.format.DateTimeFormatter
 import java.time.format.DateTimeParseException
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicBoolean
 import javax.swing.DefaultComboBoxModel
 import javax.swing.Icon
 import javax.swing.JButton
@@ -78,7 +84,10 @@ import javax.swing.tree.TreeSelectionModel
 /**
  * Main Master-Detail UI panel for Maekom Code Tracker Tool Window.
  */
-class CodeTrackerPanel(private val project: Project) : JBPanel<CodeTrackerPanel>(BorderLayout()) {
+class CodeTrackerPanel(
+    private val project: Project,
+    parentDisposable: Disposable
+) : JBPanel<CodeTrackerPanel>(BorderLayout()), Disposable {
 
     companion object {
         private const val AUTHOR_ALL = "전체"
@@ -134,6 +143,11 @@ class CodeTrackerPanel(private val project: Project) : JBPanel<CodeTrackerPanel>
     private var selectedDetail: CommitDetail? = null
     private val detailCache = ConcurrentHashMap<String, CommitDetail>()
     private var suppressComboListeners = false
+    private val repoInitInProgress = AtomicBoolean(false)
+    private val pendingRepoInit = AtomicBoolean(false)
+    private val dateDebounceTimer = javax.swing.Timer(350) { onDateRangeEdited() }.apply {
+        isRepeats = false
+    }
 
     // Tree node payloads
     private data class EpisodeNodeData(val episode: WorkEpisode)
@@ -149,11 +163,17 @@ class CodeTrackerPanel(private val project: Project) : JBPanel<CodeTrackerPanel>
     )
 
     init {
+        Disposer.register(parentDisposable, this)
         border = JBUI.Borders.empty(4)
         configureControls()
         buildLayout()
         wireListeners()
-        loadRepositoriesAsync()
+        registerRepositoryLifecycleHooks()
+        initRepositoriesAsync()
+    }
+
+    override fun dispose() {
+        dateDebounceTimer.stop()
     }
 
     private fun configureControls() {
@@ -204,6 +224,7 @@ class CodeTrackerPanel(private val project: Project) : JBPanel<CodeTrackerPanel>
 
         pointerTree.isRootVisible = false
         pointerTree.showsRootHandles = true
+        pointerTree.toggleClickCount = 0
         pointerTree.selectionModel.selectionMode = TreeSelectionModel.SINGLE_TREE_SELECTION
         pointerTree.cellRenderer = PointerTreeCellRenderer()
         pointerTree.emptyText.text = "커밋을 선택하면 레이어별 수정 위치 포인터가 표시됩니다."
@@ -352,6 +373,15 @@ class CodeTrackerPanel(private val project: Project) : JBPanel<CodeTrackerPanel>
             override fun changedUpdate(e: DocumentEvent?) = applyClientSideFilter()
         })
 
+        // Refresh author list automatically when start/end date changes
+        val dateDocListener = object : DocumentListener {
+            override fun insertUpdate(e: DocumentEvent?) = dateDebounceTimer.restart()
+            override fun removeUpdate(e: DocumentEvent?) = dateDebounceTimer.restart()
+            override fun changedUpdate(e: DocumentEvent?) = dateDebounceTimer.restart()
+        }
+        startDateField.document.addDocumentListener(dateDocListener)
+        endDateField.document.addDocumentListener(dateDocListener)
+
         layerFilterCombo.addActionListener {
             if (!suppressComboListeners) {
                 applyClientSideFilter()
@@ -391,8 +421,8 @@ class CodeTrackerPanel(private val project: Project) : JBPanel<CodeTrackerPanel>
                             }
                         }
                         is FileNodeData -> {
-                            if (e.clickCount >= 2) {
-                                navigateToFileOrHunk(obj.fileDetail, obj.fileDetail.hunks.firstOrNull())
+                            if (e.clickCount == 2) {
+                                openFileHistoryDialog(obj.fileDetail)
                             }
                         }
                     }
@@ -447,6 +477,12 @@ class CodeTrackerPanel(private val project: Project) : JBPanel<CodeTrackerPanel>
         }
 
         val popup = JPopupMenu()
+        if (node.userObject is FileNodeData) {
+            popup.add(JMenuItem("이 파일의 기간 내 수정 이력 보기").apply {
+                addActionListener { openFileHistoryDialog(fileDetail) }
+            })
+            popup.addSeparator()
+        }
         popup.add(JMenuItem("Before / After Diff 비교").apply {
             addActionListener { openDiff(fileDetail, pointer) }
         })
@@ -460,82 +496,255 @@ class CodeTrackerPanel(private val project: Project) : JBPanel<CodeTrackerPanel>
         popup.show(pointerTree, e.x, e.y)
     }
 
-    private fun loadRepositoriesAsync() {
-        ProgressManager.getInstance().run(object : Task.Backgroundable(
-            project,
-            "Maekom Code Tracker: Git 저장소 검색 중",
-            true
-        ) {
-            override fun run(indicator: ProgressIndicator) {
-                val repos = GitRepositoryService.discoverRepositories(project)
-                ApplicationManager.getApplication().invokeLater {
-                    if (project.isDisposed) return@invokeLater
-                    suppressComboListeners = true
-                    repoCombo.model = DefaultComboBoxModel(repos.toTypedArray())
-                    suppressComboListeners = false
+    private fun openFileHistoryDialog(fileDetail: FileDiffDetail) {
+        val repo = currentResult?.filter?.repo ?: (repoCombo.selectedItem as? RepoOption)
+        if (repo == null) {
+            Messages.showWarningDialog(project, "대상 Git 저장소 정보를 찾을 수 없습니다.", "Maekom Code Tracker")
+            return
+        }
+        val branch = currentResult?.filter?.branch
+            ?: (branchCombo.selectedItem as? String)?.ifBlank { "HEAD" }
+            ?: "HEAD"
+        val (startDate, endDate) = currentResult?.filter?.let { it.startDate to it.endDate }
+            ?: parseDateRangeLenient()
+        val noMerges = currentResult?.filter?.excludeMerges ?: excludeMergesCheckBox.isSelected
 
-                    val first = repos.firstOrNull()
-                    repoCombo.toolTipText = first?.displayName ?: "대상 Git 저장소/모듈"
-                    if (first != null) {
-                        loadBranchesAndAuthorsAsync(first)
-                    } else {
-                        branchCombo.model = DefaultComboBoxModel(arrayOf("HEAD"))
-                        branchCombo.toolTipText = "HEAD"
-                        authorCombo.model = DefaultComboBoxModel(arrayOf(AUTHOR_ALL))
-                        summaryLabel.text = "현재 프로젝트에서 Git 저장소를 찾지 못했습니다."
+        val dialog = FileHistoryDialog(
+            project = project,
+            repoRootPath = repo.rootPath,
+            branch = branch,
+            startDate = startDate,
+            endDate = endDate,
+            targetFilePath = fileDetail.summary.path,
+            noMerges = noMerges
+        )
+        dialog.show()
+    }
+
+    private fun registerRepositoryLifecycleHooks() {
+        // 1) Git4Idea / VCS initialization completion hook
+        runCatching {
+            ProjectLevelVcsManager.getInstance(project).runAfterInitialization {
+                initRepositoriesAsync()
+            }
+        }
+        runCatching {
+            val gitUtilClass = Class.forName("git4idea.GitUtil")
+            val getRepoMgr = gitUtilClass.getMethod("getRepositoryManager", Project::class.java)
+            val repoManager = getRepoMgr.invoke(null, project)
+            if (repoManager != null) {
+                val runWhenInit = repoManager.javaClass.methods.firstOrNull {
+                    it.name == "runWhenInitialized" && it.parameterCount == 1
+                }
+                if (runWhenInit != null) {
+                    val paramType = runWhenInit.parameterTypes[0]
+                    if (paramType == Runnable::class.java) {
+                        runWhenInit.invoke(repoManager, Runnable { initRepositoriesAsync() })
+                    } else if (Function0::class.java.isAssignableFrom(paramType)) {
+                        runWhenInit.invoke(repoManager, { initRepositoriesAsync() })
                     }
                 }
             }
-        })
+        }
+
+        // 2) Project StartupManager post-open hook
+        runCatching {
+            StartupManager.getInstance(project).runAfterOpened {
+                initRepositoriesAsync()
+            }
+        }
+
+        // 3) VCS configuration changed message bus listener (disposed automatically with panel)
+        runCatching {
+            project.messageBus.connect(this).subscribe(
+                ProjectLevelVcsManager.VCS_CONFIGURATION_CHANGED,
+                VcsListener { initRepositoriesAsync() }
+            )
+        }
+    }
+
+    private fun initRepositoriesAsync() {
+        if (project.isDisposed) return
+        if (!repoInitInProgress.compareAndSet(false, true)) {
+            pendingRepoInit.set(true)
+            return
+        }
+
+        val prevRepo = repoCombo.selectedItem as? RepoOption
+        val prevBranch = branchCombo.selectedItem as? String
+        val prevAuthor = authorCombo.selectedItem as? String
+        val (startDate, endDate) = parseDateRangeLenient()
+
+        ApplicationManager.getApplication().executeOnPooledThread {
+            try {
+                val repos = GitRepositoryService.discoverRepositories(project)
+                val targetRepo = repos.firstOrNull {
+                    prevRepo != null &&
+                        it.rootPath == prevRepo.rootPath &&
+                        it.moduleSubPath == prevRepo.moduleSubPath
+                } ?: repos.firstOrNull()
+
+                val branches = if (targetRepo != null) {
+                    GitRepositoryService.listBranches(project, targetRepo.rootPath)
+                } else {
+                    listOf("HEAD")
+                }
+
+                val targetBranch = if (prevBranch != null && branches.contains(prevBranch)) {
+                    prevBranch
+                } else {
+                    branches.firstOrNull() ?: "HEAD"
+                }
+
+                val authors = if (targetRepo != null) {
+                    GitRepositoryService.loadRecentAuthors(
+                        project = project,
+                        repoRootPath = targetRepo.rootPath,
+                        branch = targetBranch,
+                        startDate = startDate,
+                        endDate = endDate,
+                        moduleSubPath = targetRepo.moduleSubPath
+                    )
+                } else {
+                    emptyList()
+                }
+
+                ApplicationManager.getApplication().invokeLater {
+                    try {
+                        if (project.isDisposed) return@invokeLater
+                        suppressComboListeners = true
+
+                        repoCombo.model = DefaultComboBoxModel(repos.toTypedArray())
+                        if (targetRepo != null) {
+                            repoCombo.selectedItem = targetRepo
+                            repoCombo.toolTipText = targetRepo.displayName
+                        } else {
+                            repoCombo.toolTipText = "대상 Git 저장소/모듈"
+                        }
+
+                        branchCombo.model = DefaultComboBoxModel(branches.toTypedArray())
+                        branchCombo.selectedItem = targetBranch
+                        branchCombo.toolTipText = targetBranch
+
+                        val authorItems = arrayOf(AUTHOR_ALL) + authors.toTypedArray()
+                        authorCombo.model = DefaultComboBoxModel(authorItems)
+                        if (prevAuthor != null && authorItems.contains(prevAuthor)) {
+                            authorCombo.selectedItem = prevAuthor
+                        } else {
+                            authorCombo.selectedItem = AUTHOR_ALL
+                        }
+
+                        if (repos.isEmpty() && currentResult == null) {
+                            summaryLabel.text = "현재 프로젝트에서 Git 저장소를 찾지 못했습니다."
+                        } else if (repos.isNotEmpty() && currentResult == null) {
+                            summaryLabel.text = "실행 버튼을 눌러 Git 커밋 및 워크플로우를 조회하세요."
+                        }
+                    } finally {
+                        suppressComboListeners = false
+                    }
+                }
+            } finally {
+                repoInitInProgress.set(false)
+                if (pendingRepoInit.getAndSet(false) && !project.isDisposed) {
+                    initRepositoriesAsync()
+                }
+            }
+        }
+    }
+
+    private fun onDateRangeEdited() {
+        val repo = repoCombo.selectedItem as? RepoOption ?: return
+        val branch = (branchCombo.selectedItem as? String)?.ifBlank { "HEAD" } ?: "HEAD"
+        val start = runCatching { LocalDate.parse(startDateField.text.trim(), DATE_FMT) }.getOrNull() ?: return
+        val end = runCatching { LocalDate.parse(endDateField.text.trim(), DATE_FMT) }.getOrNull() ?: return
+        if (start.isAfter(end)) return
+        loadAuthorsAsync(repo, branch)
     }
 
     private fun loadBranchesAndAuthorsAsync(repo: RepoOption) {
         val (startDate, endDate) = parseDateRangeLenient()
-        ProgressManager.getInstance().run(object : Task.Backgroundable(
-            project,
-            "Maekom Code Tracker: 브랜치 및 작성자 목록 로딩 중",
-            true
-        ) {
-            override fun run(indicator: ProgressIndicator) {
-                val branches = GitRepositoryService.listBranches(project, repo.rootPath)
-                val defaultBranch = branches.firstOrNull() ?: "HEAD"
-                val authors = GitRepositoryService.listAuthors(project, repo, defaultBranch, startDate, endDate)
+        val prevBranch = branchCombo.selectedItem as? String
+        val prevAuthor = authorCombo.selectedItem as? String
 
-                ApplicationManager.getApplication().invokeLater {
-                    if (project.isDisposed) return@invokeLater
-                    suppressComboListeners = true
+        ApplicationManager.getApplication().executeOnPooledThread {
+            val branches = GitRepositoryService.listBranches(project, repo.rootPath)
+            val targetBranch = if (prevBranch != null && branches.contains(prevBranch)) {
+                prevBranch
+            } else {
+                branches.firstOrNull() ?: "HEAD"
+            }
+            val authors = GitRepositoryService.loadRecentAuthors(
+                project = project,
+                repoRootPath = repo.rootPath,
+                branch = targetBranch,
+                startDate = startDate,
+                endDate = endDate,
+                moduleSubPath = repo.moduleSubPath
+            )
+
+            ApplicationManager.getApplication().invokeLater {
+                if (project.isDisposed) return@invokeLater
+                val currentRepo = repoCombo.selectedItem as? RepoOption
+                if (currentRepo?.rootPath != repo.rootPath || currentRepo.moduleSubPath != repo.moduleSubPath) {
+                    return@invokeLater
+                }
+                suppressComboListeners = true
+                try {
                     branchCombo.model = DefaultComboBoxModel(branches.toTypedArray())
-                    branchCombo.toolTipText = branches.firstOrNull() ?: "대상 브랜치"
+                    branchCombo.selectedItem = targetBranch
+                    branchCombo.toolTipText = targetBranch
+
                     val authorItems = arrayOf(AUTHOR_ALL) + authors.toTypedArray()
                     authorCombo.model = DefaultComboBoxModel(authorItems)
+                    if (prevAuthor != null && authorItems.contains(prevAuthor)) {
+                        authorCombo.selectedItem = prevAuthor
+                    } else {
+                        authorCombo.selectedItem = AUTHOR_ALL
+                    }
+                } finally {
                     suppressComboListeners = false
                 }
             }
-        })
+        }
     }
 
     private fun loadAuthorsAsync(repo: RepoOption, branch: String) {
         val (startDate, endDate) = parseDateRangeLenient()
-        ProgressManager.getInstance().run(object : Task.Backgroundable(
-            project,
-            "Maekom Code Tracker: 작성자 목록 로딩 중",
-            true
-        ) {
-            override fun run(indicator: ProgressIndicator) {
-                val authors = GitRepositoryService.listAuthors(project, repo, branch, startDate, endDate)
-                ApplicationManager.getApplication().invokeLater {
-                    if (project.isDisposed) return@invokeLater
-                    suppressComboListeners = true
-                    val prev = authorCombo.selectedItem as? String
+        val prevAuthor = authorCombo.selectedItem as? String
+
+        ApplicationManager.getApplication().executeOnPooledThread {
+            val authors = GitRepositoryService.loadRecentAuthors(
+                project = project,
+                repoRootPath = repo.rootPath,
+                branch = branch,
+                startDate = startDate,
+                endDate = endDate,
+                moduleSubPath = repo.moduleSubPath
+            )
+            ApplicationManager.getApplication().invokeLater {
+                if (project.isDisposed) return@invokeLater
+                val currentRepo = repoCombo.selectedItem as? RepoOption
+                val currentBranch = branchCombo.selectedItem as? String
+                if (currentRepo?.rootPath != repo.rootPath ||
+                    currentRepo.moduleSubPath != repo.moduleSubPath ||
+                    currentBranch != branch
+                ) {
+                    return@invokeLater
+                }
+                suppressComboListeners = true
+                try {
                     val authorItems = arrayOf(AUTHOR_ALL) + authors.toTypedArray()
                     authorCombo.model = DefaultComboBoxModel(authorItems)
-                    if (prev != null && authorItems.contains(prev)) {
-                        authorCombo.selectedItem = prev
+                    if (prevAuthor != null && authorItems.contains(prevAuthor)) {
+                        authorCombo.selectedItem = prevAuthor
+                    } else {
+                        authorCombo.selectedItem = AUTHOR_ALL
                     }
+                } finally {
                     suppressComboListeners = false
                 }
             }
-        })
+        }
     }
 
     private fun parseDateRangeLenient(): Pair<LocalDate, LocalDate> {

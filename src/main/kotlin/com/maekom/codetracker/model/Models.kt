@@ -247,3 +247,36 @@ data class AnalysisResult(
     val totalModifiedFiles: Int,
     val truncatedToLimit: Boolean
 )
+
+data class FileHistoryCommitEntry(
+    val commit: CommitSummary,
+    val status: FileChangeStatus,
+    val pathAtCommit: String,
+    val oldPathAtCommit: String? = null,
+    val versionGroupLabel: String
+) {
+    fun toFileSummary(): FileSummary = FileSummary(
+        path = pathAtCommit,
+        oldPath = oldPathAtCommit,
+        status = status,
+        primaryLayer = commit.files.firstOrNull { it.path == pathAtCommit }?.primaryLayer
+            ?: commit.primaryLayers.firstOrNull()
+            ?: PrimaryLayer.ETC
+    )
+}
+
+data class FileHistoryVersionGroup(
+    val groupLabel: String,
+    val isTagGroup: Boolean,
+    val entries: List<FileHistoryCommitEntry>
+)
+
+data class FileHistoryResult(
+    val targetFilePath: String,
+    val branch: String,
+    val startDate: LocalDate,
+    val endDate: LocalDate,
+    val hasTagsInRepo: Boolean,
+    val groups: List<FileHistoryVersionGroup>,
+    val totalCommits: Int
+)

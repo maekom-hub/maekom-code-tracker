@@ -2,10 +2,14 @@ package com.maekom.codetracker.git
 
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.vcs.ProjectLevelVcsManager
+import com.maekom.codetracker.analysis.EpisodeGrouper
 import com.maekom.codetracker.analysis.LayerClassifier
 import com.maekom.codetracker.model.AnalysisFilter
 import com.maekom.codetracker.model.CommitSummary
 import com.maekom.codetracker.model.FileChangeStatus
+import com.maekom.codetracker.model.FileHistoryCommitEntry
+import com.maekom.codetracker.model.FileHistoryResult
+import com.maekom.codetracker.model.FileHistoryVersionGroup
 import com.maekom.codetracker.model.FileSummary
 import com.maekom.codetracker.model.RepoOption
 import java.io.File
@@ -126,12 +130,13 @@ object GitRepositoryService {
         return result.toList()
     }
 
-    fun listAuthors(
+    fun loadRecentAuthors(
         project: Project,
-        repo: RepoOption,
+        repoRootPath: String,
         branch: String,
         startDate: LocalDate,
-        endDate: LocalDate
+        endDate: LocalDate,
+        moduleSubPath: String? = null
     ): List<String> {
         val args = mutableListOf(
             branch.ifBlank { "HEAD" },
@@ -140,12 +145,12 @@ object GitRepositoryService {
             "--until=${endDate.format(DATE_FMT)} 23:59:59",
             "--format=%an"
         )
-        if (!repo.moduleSubPath.isNullOrBlank()) {
+        if (!moduleSubPath.isNullOrBlank()) {
             args.add("--")
-            args.add(repo.moduleSubPath)
+            args.add(moduleSubPath)
         }
 
-        val out = GitCommandRunner.runReadOnly(project, repo.rootPath, "log", args)
+        val out = GitCommandRunner.runReadOnly(project, repoRootPath, "log", args)
         if (out.exitCode != 0) return emptyList()
 
         return out.stdout.lineSequence()
@@ -155,6 +160,21 @@ object GitRepositoryService {
             .sortedWith(String.CASE_INSENSITIVE_ORDER)
             .toList()
     }
+
+    fun listAuthors(
+        project: Project,
+        repo: RepoOption,
+        branch: String,
+        startDate: LocalDate,
+        endDate: LocalDate
+    ): List<String> = loadRecentAuthors(
+        project = project,
+        repoRootPath = repo.rootPath,
+        branch = branch,
+        startDate = startDate,
+        endDate = endDate,
+        moduleSubPath = repo.moduleSubPath
+    )
 
     /**
      * Phase 1: Lightweight commit + changed file status collection (up to 500 commits).
@@ -312,6 +332,257 @@ object GitRepositoryService {
             throw IllegalStateException("Git show 조회 실패 ($commitHash): ${output.stderr.trim()}")
         }
         return output.stdout
+    }
+
+    /**
+     * On-demand unified diff retrieval for a single file at a specific commit.
+     */
+    fun fetchSingleFileShowDiff(
+        project: Project,
+        repoRootPath: String,
+        commitHash: String,
+        pathAtCommit: String
+    ): String {
+        val output = GitCommandRunner.runReadOnly(
+            project = project,
+            repoRootPath = repoRootPath,
+            subcommand = "show",
+            args = listOf(
+                "--find-renames",
+                "--unified=3",
+                "--format=",
+                commitHash,
+                "--",
+                pathAtCommit
+            ),
+            maxOutputBytes = 4 * 1024 * 1024
+        )
+        if (output.exitCode != 0) {
+            throw IllegalStateException("Git show 파일 Diff 조회 실패 ($commitHash -- $pathAtCommit): ${output.stderr.trim()}")
+        }
+        return output.stdout
+    }
+
+    /**
+     * Single-pass optimized file history collection with release version/tag grouping.
+     * Follows renames (--follow --find-renames --name-status) and maps each commit to
+     * the earliest tag containing it without running per-commit `git tag --contains`.
+     * Falls back to date/work-episode grouping if the repository has no Git tags.
+     */
+    fun collectFileHistoryWithVersions(
+        project: Project,
+        repoRootPath: String,
+        branch: String,
+        startDate: LocalDate,
+        endDate: LocalDate,
+        filePath: String,
+        noMerges: Boolean
+    ): FileHistoryResult {
+        val resolvedBranch = branch.ifBlank { "HEAD" }
+        val prettyFormat = "${RECORD_SEP}%H${FIELD_SEP}%h${FIELD_SEP}%P${FIELD_SEP}%an${FIELD_SEP}%ae${FIELD_SEP}%at${FIELD_SEP}%s${FIELD_SEP}%B${HEADER_END}"
+
+        val args = mutableListOf(
+            resolvedBranch,
+            "-n", MAX_COMMITS.toString(),
+            "--follow",
+            "--find-renames",
+            "--name-status",
+            "--since=${startDate.format(DATE_FMT)} 00:00:00",
+            "--until=${endDate.format(DATE_FMT)} 23:59:59",
+            "--pretty=format:$prettyFormat"
+        )
+        if (noMerges) {
+            args.add("--no-merges")
+        }
+        args.add("--")
+        args.add(filePath)
+
+        val logOutput = GitCommandRunner.runReadOnly(
+            project = project,
+            repoRootPath = repoRootPath,
+            subcommand = "log",
+            args = args
+        )
+        if (logOutput.exitCode != 0) {
+            if (logOutput.stderr.contains("does not have any commits yet", ignoreCase = true) ||
+                logOutput.stderr.contains("unknown revision", ignoreCase = true)
+            ) {
+                return FileHistoryResult(filePath, resolvedBranch, startDate, endDate, false, emptyList(), 0)
+            }
+            throw IllegalStateException("파일 수정 이력 조회 실패: ${logOutput.stderr.trim()}")
+        }
+
+        val commits = parseCommitLogOutput(logOutput.stdout)
+        if (commits.isEmpty()) {
+            return FileHistoryResult(filePath, resolvedBranch, startDate, endDate, false, emptyList(), 0)
+        }
+
+        // Check if repository has any tags in 1 lightweight call
+        val showRefOut = GitCommandRunner.runReadOnly(
+            project = project,
+            repoRootPath = repoRootPath,
+            subcommand = "show-ref",
+            args = listOf("--tags"),
+            timeoutSeconds = 10
+        )
+        val hasTagsInRepo = showRefOut.exitCode == 0 && showRefOut.stdout.isNotBlank()
+
+        if (hasTagsInRepo) {
+            val targetHashes = commits.map { it.hash }.toSet()
+            val commitToTag = resolveFirstContainingTags(
+                project = project,
+                repoRootPath = repoRootPath,
+                branch = resolvedBranch,
+                targetHashes = targetHashes
+            )
+
+            // Preserve branch newest-to-oldest group order
+            val groupedMap = linkedMapOf<String, MutableList<FileHistoryCommitEntry>>()
+            for (commit in commits) {
+                val fileAtCommit = commit.files.firstOrNull()
+                val pathAtCommit = fileAtCommit?.path ?: filePath
+                val status = fileAtCommit?.status ?: FileChangeStatus.MODIFIED
+                val oldPath = fileAtCommit?.oldPath
+                val tagLabel = commitToTag[commit.hash] ?: "Unreleased (HEAD)"
+
+                groupedMap.computeIfAbsent(tagLabel) { mutableListOf() }.add(
+                    FileHistoryCommitEntry(
+                        commit = commit,
+                        status = status,
+                        pathAtCommit = pathAtCommit,
+                        oldPathAtCommit = oldPath,
+                        versionGroupLabel = tagLabel
+                    )
+                )
+            }
+
+            val groups = groupedMap.map { (label, entries) ->
+                FileHistoryVersionGroup(
+                    groupLabel = label,
+                    isTagGroup = true,
+                    entries = entries
+                )
+            }
+            return FileHistoryResult(
+                targetFilePath = filePath,
+                branch = resolvedBranch,
+                startDate = startDate,
+                endDate = endDate,
+                hasTagsInRepo = true,
+                groups = groups,
+                totalCommits = commits.size
+            )
+        } else {
+            // No tags in repo: group by Date / Work Episode automatically
+            val episodes = EpisodeGrouper.groupIntoEpisodes(commits)
+            val groups = episodes.map { ep ->
+                val label = "${ep.date} | ${ep.authorName}"
+                val entries = ep.commits.reversed().map { commit ->
+                    val fileAtCommit = commit.files.firstOrNull()
+                    FileHistoryCommitEntry(
+                        commit = commit,
+                        status = fileAtCommit?.status ?: FileChangeStatus.MODIFIED,
+                        pathAtCommit = fileAtCommit?.path ?: filePath,
+                        oldPathAtCommit = fileAtCommit?.oldPath,
+                        versionGroupLabel = label
+                    )
+                }
+                FileHistoryVersionGroup(
+                    groupLabel = label,
+                    isTagGroup = false,
+                    entries = entries
+                )
+            }
+            return FileHistoryResult(
+                targetFilePath = filePath,
+                branch = resolvedBranch,
+                startDate = startDate,
+                endDate = endDate,
+                hasTagsInRepo = false,
+                groups = groups,
+                totalCommits = commits.size
+            )
+        }
+    }
+
+    /**
+     * Resolves the earliest release tag covering each target commit on [branch] in a single
+     * lightweight `git log --decorate=full` walk (plus `--simplify-by-decoration` validation).
+     */
+    private fun resolveFirstContainingTags(
+        project: Project,
+        repoRootPath: String,
+        branch: String,
+        targetHashes: Set<String>
+    ): Map<String, String> {
+        // Fast check whether branch history has any tags at all via --simplify-by-decoration
+        val decoCheck = GitCommandRunner.runReadOnly(
+            project = project,
+            repoRootPath = repoRootPath,
+            subcommand = "log",
+            args = listOf(
+                branch,
+                "--simplify-by-decoration",
+                "--decorate=full",
+                "--pretty=format:%H%x1f%D"
+            ),
+            timeoutSeconds = 15
+        )
+        if (decoCheck.exitCode != 0 || !decoCheck.stdout.contains("tag: refs/tags/")) {
+            return targetHashes.associateWith { "Unreleased (HEAD)" }
+        }
+
+        // Single pass walking branch commits newest -> oldest to propagate the first tag covering each commit
+        val walkOut = GitCommandRunner.runReadOnly(
+            project = project,
+            repoRootPath = repoRootPath,
+            subcommand = "log",
+            args = listOf(
+                branch,
+                "-n", "5000",
+                "--decorate=full",
+                "--pretty=format:%H%x1f%D"
+            ),
+            timeoutSeconds = 20
+        )
+        if (walkOut.exitCode != 0) {
+            return targetHashes.associateWith { "Unreleased (HEAD)" }
+        }
+
+        val result = linkedMapOf<String, String>()
+        var currentCoveringTag = "Unreleased (HEAD)"
+
+        for (line in walkOut.stdout.lineSequence()) {
+            if (line.isBlank()) continue
+            val sepIdx = line.indexOf('\u001F')
+            val hash = if (sepIdx >= 0) line.substring(0, sepIdx).trim() else line.trim()
+            val deco = if (sepIdx >= 0) line.substring(sepIdx + 1).trim() else ""
+
+            if (deco.isNotEmpty()) {
+                val tagOnCommit = extractPrimaryTagName(deco)
+                if (tagOnCommit != null) {
+                    currentCoveringTag = tagOnCommit
+                }
+            }
+
+            if (hash in targetHashes) {
+                result[hash] = currentCoveringTag
+                if (result.size >= targetHashes.size) {
+                    break
+                }
+            }
+        }
+        return result
+    }
+
+    private fun extractPrimaryTagName(decoration: String): String? {
+        val tags = decoration.split(',')
+            .map { it.trim() }
+            .filter { it.startsWith("tag: refs/tags/") }
+            .map { it.removePrefix("tag: refs/tags/").trim() }
+            .filter { it.isNotEmpty() }
+        if (tags.isEmpty()) return null
+        return tags.first()
     }
 
     /**

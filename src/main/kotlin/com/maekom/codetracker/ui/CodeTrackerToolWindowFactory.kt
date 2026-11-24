@@ -24,7 +24,7 @@ import javax.swing.JPanel
 class CodeTrackerToolWindowFactory : ToolWindowFactory, DumbAware {
 
     override fun createToolWindowContent(project: Project, toolWindow: ToolWindow) {
-        val panel = CodeTrackerPanel(project)
+        val panel = CodeTrackerPanel(project, toolWindow.disposable)
         val content = ContentFactory.getInstance().createContent(panel, "", false)
         toolWindow.contentManager.addContent(content)
         toolWindow.setTitleActions(listOf(VersionAndUpdateTitleAction(panel)))
