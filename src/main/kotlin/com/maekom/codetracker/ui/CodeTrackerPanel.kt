@@ -107,6 +107,14 @@ class CodeTrackerPanel(
         private val TIME_FMT = DateTimeFormatter.ofPattern("HH:mm")
         private const val CARD_TIMELINE = "TIMELINE"
         private const val CARD_FLOW = "FLOW"
+        private const val MAX_DISPLAYED_ISSUES = 8
+        private val ISSUE_KEY_REGEX = Regex("""(?<![A-Za-z0-9_])([A-Za-z][A-Za-z0-9_]{1,15}-\d+)(?![A-Za-z0-9_])""")
+        private val ISSUE_KEY_BLACKLIST = setOf(
+            "UTF-8", "UTF-16", "SHA-1", "SHA-256", "SHA-512", "MD-5", "ISO-8601",
+            "JDK-8", "JDK-11", "JDK-17", "JDK-21",
+            "HTTP-200", "HTTP-400", "HTTP-401", "HTTP-403", "HTTP-404", "HTTP-500",
+            "TLS-1", "S-3", "EC-2"
+        )
     }
 
     private data class AuthorOption(val rawName: String?) {
@@ -1302,13 +1310,55 @@ class CodeTrackerPanel(
             ""
         }
 
-        summaryLabel.text = CodeTrackerI18n.summaryStrip(
+        val baseSummary = CodeTrackerI18n.summaryStrip(
             totalCommits = totalCommits,
             totalFiles = totalFiles,
             truncated = truncated,
             maxCommits = GitRepositoryService.MAX_COMMITS,
             layerRatio = layerRatioStr,
             stackPart = stackStr
+        )
+
+        val sortedIssues = aggregateIssueCounts(commits)
+        if (sortedIssues.isEmpty()) {
+            summaryLabel.text = baseSummary
+            summaryLabel.toolTipText = null
+        } else {
+            val visiblePart = sortedIssues.take(MAX_DISPLAYED_ISSUES)
+                .joinToString(" | ") { (key, count) -> "$key($count)" }
+            val extraCount = sortedIssues.size - MAX_DISPLAYED_ISSUES
+            val issuePart = if (extraCount > 0) {
+                "$visiblePart | ${CodeTrackerI18n.tr("+${extraCount}건", "+$extraCount more")}"
+            } else {
+                visiblePart
+            }
+            summaryLabel.text = "$baseSummary || $issuePart"
+
+            val fullIssuesHtml = sortedIssues.joinToString("<br/>") { (key, count) ->
+                "<b>$key</b>: ${CodeTrackerI18n.commitsCountUnit(count)}"
+            }
+            val tooltipTitle = CodeTrackerI18n.tr(
+                "조회 기간 내 이슈별 커밋 집계 (총 ${sortedIssues.size}개 이슈)",
+                "Issue Commit Summary in Period (${sortedIssues.size} issues)"
+            )
+            summaryLabel.toolTipText = "<html><body><b>$tooltipTitle</b><br/>$fullIssuesHtml</body></html>"
+        }
+    }
+
+    private fun aggregateIssueCounts(commits: List<CommitSummary>): List<Map.Entry<String, Int>> {
+        val counts = HashMap<String, Int>()
+        for (commit in commits) {
+            val text = "${commit.subject}\n${commit.body}"
+            val uniqueKeysInCommit = ISSUE_KEY_REGEX.findAll(text)
+                .map { it.groupValues[1].uppercase() }
+                .filter { it !in ISSUE_KEY_BLACKLIST }
+                .distinct()
+            for (key in uniqueKeysInCommit) {
+                counts[key] = (counts[key] ?: 0) + 1
+            }
+        }
+        return counts.entries.sortedWith(
+            compareByDescending<Map.Entry<String, Int>> { it.value }.thenBy { it.key }
         )
     }
 
