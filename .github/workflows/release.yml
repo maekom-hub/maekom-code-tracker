@@ -33,9 +33,29 @@ jobs:
           chmod +x ./gradlew
           ./gradlew buildPlugin
 
-      - name: Create GitHub Release & Upload Plugin ZIP
+      - name: Generate Custom Plugin Repository Metadata (updatePlugins.xml)
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: bash
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          cat <<EOF > updatePlugins.xml
+          <?xml version="1.0" encoding="UTF-8"?>
+          <plugins>
+            <plugin id="com.maekom.codetracker" url="https://github.com/maekom-hub/maekom-code-tracker/releases/download/${GITHUB_REF_NAME}/maekom-code-tracker-${VERSION}.zip" version="${VERSION}">
+              <idea-version since-build="242"/>
+              <name>Maekom Code Tracker</name>
+              <description>Read-only offline Git and Spring Boot workflow analyzer for IntelliJ IDEA.</description>
+              <change-notes>Release ${GITHUB_REF_NAME}</change-notes>
+            </plugin>
+          </plugins>
+          EOF
+          cat updatePlugins.xml
+
+      - name: Create GitHub Release & Upload Plugin ZIP and updatePlugins.xml
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
-          files: build/distributions/maekom-code-tracker-*.zip
+          files: |
+            build/distributions/maekom-code-tracker-*.zip
+            updatePlugins.xml
           generate_release_notes: true

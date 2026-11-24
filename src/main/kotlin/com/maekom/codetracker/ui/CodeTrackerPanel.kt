@@ -1,9 +1,10 @@
 package com.maekom.codetracker.ui
 
 import com.intellij.icons.AllIcons
-import com.intellij.ide.BrowserUtil
+import com.intellij.ide.plugins.PluginManagerConfigurable
 import com.intellij.openapi.application.ApplicationManager
 import com.intellij.openapi.ide.CopyPasteManager
+import com.intellij.openapi.options.ShowSettingsUtil
 import com.intellij.openapi.progress.ProgressIndicator
 import com.intellij.openapi.progress.ProgressManager
 import com.intellij.openapi.progress.Task
@@ -867,6 +868,8 @@ class CodeTrackerPanel(private val project: Project) : JBPanel<CodeTrackerPanel>
 
     fun triggerUpdateCheck(versionLabel: JBLabel? = null, triggerButton: JButton? = null) {
         triggerButton?.isEnabled = false
+        // Register Custom Plugin Repository host in IntelliJ UpdateSettings before querying
+        PluginUpdateChecker.ensureCustomPluginRepoRegistered()
 
         ProgressManager.getInstance().run(object : Task.Backgroundable(
             project,
@@ -887,24 +890,19 @@ class CodeTrackerPanel(private val project: Project) : JBPanel<CodeTrackerPanel>
                             val message = buildString {
                                 appendLine("새 버전의 Maekom Code Tracker가 출시되었습니다.")
                                 appendLine()
-                                appendLine("현재 버전: v${result.currentVersion}")
-                                appendLine("최신 버전: v${result.latestVersion}")
-                                appendLine("직접 다운로드 URL:")
-                                appendLine(result.directDownloadUrl)
+                                appendLine("버전: v${result.currentVersion} → v${result.latestVersion}")
                                 appendLine()
-                                append("GitHub 릴리즈 페이지를 브라우저에서 여시겠습니까?")
+                                append("확인을 누르면 IntelliJ Settings > Plugins 창이 열립니다. 목록에서 [Update] 버튼을 눌러 바로 업데이트하세요.")
                             }
-                            val choice = Messages.showYesNoDialog(
+                            Messages.showInfoMessage(
                                 project,
                                 message,
-                                "Maekom Code Tracker - 업데이트 안내",
-                                "릴리즈 페이지 열기",
-                                "닫기",
-                                Messages.getInformationIcon()
+                                "Maekom Code Tracker - 새 버전 안내"
                             )
-                            if (choice == Messages.YES) {
-                                BrowserUtil.browse(result.releasePageUrl)
-                            }
+                            ShowSettingsUtil.getInstance().showSettingsDialog(
+                                project,
+                                PluginManagerConfigurable::class.java
+                            )
                         }
 
                         is UpdateCheckResult.UpToDate -> {
@@ -915,11 +913,11 @@ class CodeTrackerPanel(private val project: Project) : JBPanel<CodeTrackerPanel>
                             )
                         }
 
-                        is UpdateCheckResult.NoReleaseYet -> {
+                        is UpdateCheckResult.RepoNotPublishedYet -> {
                             Messages.showInfoMessage(
                                 project,
                                 result.message,
-                                "Maekom Code Tracker - 업데이트 확인"
+                                "Maekom Code Tracker - 업데이트 저장소 등록"
                             )
                         }
 

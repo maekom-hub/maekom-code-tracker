@@ -2,6 +2,7 @@ package com.maekom.codetracker.update
 
 import com.intellij.ide.plugins.PluginManagerCore
 import com.intellij.openapi.extensions.PluginId
+import com.intellij.openapi.updateSettings.impl.UpdateSettings
 import java.net.ConnectException
 import java.net.URI
 import java.net.UnknownHostException
@@ -14,9 +15,7 @@ import java.time.Duration
 sealed class UpdateCheckResult(val currentVersion: String) {
     class UpdateAvailable(
         currentVersion: String,
-        val latestVersion: String,
-        val releasePageUrl: String,
-        val directDownloadUrl: String
+        val latestVersion: String
     ) : UpdateCheckResult(currentVersion)
 
     class UpToDate(
@@ -24,9 +23,9 @@ sealed class UpdateCheckResult(val currentVersion: String) {
         val latestVersion: String
     ) : UpdateCheckResult(currentVersion)
 
-    class NoReleaseYet(
+    class RepoNotPublishedYet(
         currentVersion: String,
-        val message: String = "아직 GitHub에 등록된 공식 릴리즈가 없습니다."
+        val message: String = "Custom Plugin Repository가 등록되었습니다. 릴리즈 배포 후 Plugins 창에서 바로 업데이트할 수 있습니다."
     ) : UpdateCheckResult(currentVersion)
 
     class Error(
@@ -36,21 +35,22 @@ sealed class UpdateCheckResult(val currentVersion: String) {
 }
 
 /**
- * Manual on-demand GitHub Release update checker.
- * Invoked ONLY when the user explicitly clicks the [업데이트 확인] button.
- * Uses JDK built-in java.net.http.HttpClient with zero external HTTP libraries and zero telemetry.
+ * Manual on-demand Custom Plugin Repository (updatePlugins.xml) update checker.
+ * Invoked ONLY when the user explicitly clicks the [업데이트 확인] button in the ToolWindow title bar.
+ * Registers the Custom Plugin Repository host in IntelliJ UpdateSettings and fetches updatePlugins.xml
+ * using JDK built-in java.net.http.HttpClient with zero external HTTP libraries and zero telemetry.
  */
 object PluginUpdateChecker {
 
     private const val PLUGIN_ID = "com.maekom.codetracker"
-    private const val FALLBACK_VERSION = "0.1.2"
-    private const val REPO_SLUG = "maekom-hub/maekom-code-tracker"
-    private const val LATEST_RELEASE_API_URL = "https://api.github.com/repos/$REPO_SLUG/releases/latest"
+    private const val FALLBACK_VERSION = "0.1.3"
+    const val CUSTOM_REPO_URL =
+        "https://github.com/maekom-hub/maekom-code-tracker/releases/latest/download/updatePlugins.xml"
     private const val USER_AGENT = "Maekom-Code-Tracker"
     private const val TIMEOUT_SECONDS = 5L
 
-    private val TAG_NAME_REGEX = Regex(""""tag_name"\s*:\s*"([^"]+)"""")
-    private val HTML_URL_REGEX = Regex(""""html_url"\s*:\s*"([^"]+)"""")
+    // Matches version="..." specifically inside <plugin ...> element (never <?xml version="1.0"?>)
+    private val PLUGIN_VERSION_REGEX = Regex("""<plugin\b[^>]*\bversion\s*=\s*"([^"]+)"""")
 
     fun getCurrentVersion(): String {
         return runCatching {
@@ -58,41 +58,48 @@ object PluginUpdateChecker {
         }.getOrNull()?.takeIf { it.isNotBlank() } ?: FALLBACK_VERSION
     }
 
-    fun buildDirectDownloadUrl(version: String): String {
-        val clean = version.trim().removePrefix("v").removePrefix("V")
-        return "https://github.com/$REPO_SLUG/releases/download/v$clean/maekom-code-tracker-$clean.zip"
+    /**
+     * Ensures the fixed Custom Plugin Repository URL is registered in IntelliJ's storedPluginHosts
+     * so IntelliJ's built-in Plugins UI can detect and apply one-click updates.
+     */
+    fun ensureCustomPluginRepoRegistered(): Boolean {
+        return runCatching {
+            val hosts = UpdateSettings.getInstance().storedPluginHosts
+            if (!hosts.contains(CUSTOM_REPO_URL)) {
+                hosts.add(CUSTOM_REPO_URL)
+                true
+            } else {
+                false
+            }
+        }.getOrDefault(false)
     }
 
     fun checkLatestRelease(): UpdateCheckResult {
         val currentVersion = getCurrentVersion()
         return try {
             val client = HttpClient.newBuilder()
-                .connectTimeout(Duration.ofSeconds(TIMEOUT_SECONDS))
                 .followRedirects(HttpClient.Redirect.NORMAL)
+                .connectTimeout(Duration.ofSeconds(TIMEOUT_SECONDS))
                 .build()
 
             val request = HttpRequest.newBuilder()
-                .uri(URI.create(LATEST_RELEASE_API_URL))
+                .uri(URI.create(CUSTOM_REPO_URL))
                 .timeout(Duration.ofSeconds(TIMEOUT_SECONDS))
-                .header("Accept", "application/vnd.github+json")
+                .header("Accept", "application/xml, text/xml;q=0.9, */*;q=0.8")
                 .header("User-Agent", USER_AGENT)
                 .GET()
                 .build()
 
             val response = client.send(request, HttpResponse.BodyHandlers.ofString())
             when (response.statusCode()) {
-                200 -> parseSuccessResponse(currentVersion, response.body())
-                404 -> UpdateCheckResult.NoReleaseYet(
+                200 -> parseUpdatePluginsXml(currentVersion, response.body())
+                404 -> UpdateCheckResult.RepoNotPublishedYet(
                     currentVersion = currentVersion,
-                    message = "아직 GitHub에 등록된 공식 릴리즈가 없습니다."
-                )
-                403, 429 -> UpdateCheckResult.Error(
-                    currentVersion = currentVersion,
-                    message = "GitHub API 요청 한도 초과 또는 접근이 제한되었습니다 (HTTP ${response.statusCode()}). 잠시 후 다시 시도해 주세요."
+                    message = "Custom Plugin Repository가 등록되었습니다. 릴리즈 배포 후 Plugins 창에서 바로 업데이트할 수 있습니다."
                 )
                 else -> UpdateCheckResult.Error(
                     currentVersion = currentVersion,
-                    message = "최신 버전 정보를 조회하지 못했습니다 (HTTP ${response.statusCode()})."
+                    message = "최신 업데이트 메타데이터(updatePlugins.xml)를 조회하지 못했습니다 (HTTP ${response.statusCode()})."
                 )
             }
         } catch (_: HttpTimeoutException) {
@@ -118,26 +125,20 @@ object PluginUpdateChecker {
         }
     }
 
-    internal fun parseSuccessResponse(currentVersion: String, body: String): UpdateCheckResult {
-        val rawTag = TAG_NAME_REGEX.find(body)?.groupValues?.getOrNull(1)?.trim()
-        if (rawTag.isNullOrBlank()) {
+    internal fun parseUpdatePluginsXml(currentVersion: String, xmlBody: String): UpdateCheckResult {
+        val rawVersion = PLUGIN_VERSION_REGEX.find(xmlBody)?.groupValues?.getOrNull(1)?.trim()
+        if (rawVersion.isNullOrBlank()) {
             return UpdateCheckResult.Error(
                 currentVersion = currentVersion,
-                message = "GitHub 릴리즈 응답에서 버전 정보(tag_name)를 확인할 수 없습니다."
+                message = "updatePlugins.xml 응답에서 플러그인 버전(version) 정보를 찾을 수 없습니다."
             )
         }
 
-        val latestVersion = rawTag.removePrefix("v").removePrefix("V")
-        val releasePageUrl = HTML_URL_REGEX.find(body)?.groupValues?.getOrNull(1)?.trim()
-            ?.takeIf { it.startsWith("https://") }
-            ?: "https://github.com/$REPO_SLUG/releases/tag/v$latestVersion"
-
+        val latestVersion = rawVersion.removePrefix("v").removePrefix("V")
         return if (compareSemanticVersions(currentVersion, latestVersion) < 0) {
             UpdateCheckResult.UpdateAvailable(
                 currentVersion = currentVersion,
-                latestVersion = latestVersion,
-                releasePageUrl = releasePageUrl,
-                directDownloadUrl = buildDirectDownloadUrl(latestVersion)
+                latestVersion = latestVersion
             )
         } else {
             UpdateCheckResult.UpToDate(
@@ -148,7 +149,7 @@ object PluginUpdateChecker {
     }
 
     /**
-     * Compares two dot-delimited semantic versions using integer arrays (e.g. "0.1.1" vs "0.1.10").
+     * Compares two dot-delimited semantic versions using integer arrays (e.g. "0.1.3" vs "0.1.10").
      * Returns negative if [current] < [latest], 0 if equal, positive if [current] > [latest].
      */
     internal fun compareSemanticVersions(current: String, latest: String): Int {

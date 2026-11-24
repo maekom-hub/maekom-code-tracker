@@ -48,6 +48,7 @@ PostgreSQL(JPA + MyBatis), Redis, MongoDB 및 외부 MSA/레거시 API 연동이
 <!-- VERSION_HISTORY_START -->
 | 버전 | 릴리즈 날짜 | 주요 변경 요약 | 다운로드 |
 | --- | --- | --- | --- |
+| `v0.1.3` | 2026-11-24 | Custom Plugin Repository(updatePlugins.xml) 및 IntelliJ Plugins 창 원클릭 업데이트 연동 | [maekom-code-tracker-0.1.3.zip](https://github.com/maekom-hub/maekom-code-tracker/releases/download/v0.1.3/maekom-code-tracker-0.1.3.zip) |
 | `v0.1.2` | 2026-11-24 | 상단 타이틀 바 통합, 필터 UI 아이콘 경량화, 상세 패널 폰트 축소 및 import/공백 포인터 제외 | [maekom-code-tracker-0.1.2.zip](https://github.com/maekom-hub/maekom-code-tracker/releases/download/v0.1.2/maekom-code-tracker-0.1.2.zip) |
 | `v0.1.0` | 2026-11-24 | Maekom Code Tracker v0.1.0 초기 릴리즈 (Spring Boot/GitLab 읽기 전용 워크플로우 및 스마트 코드 포인터) | [maekom-code-tracker-0.1.0.zip](https://github.com/maekom-hub/maekom-code-tracker/releases/download/v0.1.0/maekom-code-tracker-0.1.0.zip) |
 <!-- VERSION_HISTORY_END -->
