@@ -48,6 +48,7 @@ PostgreSQL(JPA + MyBatis), Redis, MongoDB 및 외부 MSA/레거시 API 연동이
 <!-- VERSION_HISTORY_START -->
 | 버전 | 릴리즈 날짜 | 주요 변경 요약 | 다운로드 |
 | --- | --- | --- | --- |
+| `v0.1.7` | 2026-11-24 | 파일 수정 이력 팝업 네이티브 로딩 스피너 모션, 창 크기 기억 및 연속 탐색 UX 고도화 | [maekom-code-tracker-0.1.7.zip](https://github.com/maekom-hub/maekom-code-tracker/releases/download/v0.1.7/maekom-code-tracker-0.1.7.zip) |
 | `v0.1.6` | 2026-11-24 | 초기 브랜치·작성자 자동 로딩 수정 및 버전별 중첩 파일 수정 이력·스마트 포인터(Diff 연동) 팝업 추가 | [maekom-code-tracker-0.1.6.zip](https://github.com/maekom-hub/maekom-code-tracker/releases/download/v0.1.6/maekom-code-tracker-0.1.6.zip) |
 | `v0.1.5` | 2026-11-24 | 스마트 위치 포인터 실제 변경 라인 오프셋(±3줄 오차) 보정 및 Diff 창 해당 라인 자동 스크롤 추가 | [maekom-code-tracker-0.1.5.zip](https://github.com/maekom-hub/maekom-code-tracker/releases/download/v0.1.5/maekom-code-tracker-0.1.5.zip) |
 | `v0.1.4` | 2026-11-24 | 스마트 위치 포인터 하위 연관 .md 수정 근거 요약 및 툴팁 표시 추가 | [maekom-code-tracker-0.1.4.zip](https://github.com/maekom-hub/maekom-code-tracker/releases/download/v0.1.4/maekom-code-tracker-0.1.4.zip) |
