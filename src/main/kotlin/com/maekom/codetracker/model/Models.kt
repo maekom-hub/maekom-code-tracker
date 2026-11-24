@@ -219,7 +219,8 @@ data class FileDiffDetail(
     val apiHints: List<ApiEndpointHint>,
     val hasTransactionalChange: Boolean,
     val skippedLargeOrBinary: Boolean = false,
-    val skipReason: String? = null
+    val skipReason: String? = null,
+    val onlyImportOrWhitespaceChanges: Boolean = false
 )
 
 data class CommitDetail(

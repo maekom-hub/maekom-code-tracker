@@ -188,14 +188,12 @@ object UnifiedDiffParser {
         val hunks = mutableListOf<CodeHunkPointer>()
         val addedComments = linkedSetOf<String>()
         val apiHints = mutableListOf<ApiEndpointHint>()
+        val substantiveAddedLines = StringBuilder()
         var addedTotal = 0
         var deletedTotal = 0
         var hasTransactionalChange = false
-
-        val stackTags = LayerClassifier.detectStackTags(section, resolvedPath)
-        val shouldExtractApis = summary.primaryLayer == PrimaryLayer.CONTROLLER_API ||
-            summary.primaryLayer == PrimaryLayer.EXTERNAL_MSA_CLIENT ||
-            StackTag.MSA_LEGACY_API in stackTags
+        var rawHunkCount = 0
+        var filteredNoiseHunkCount = 0
 
         var currentOldStart = 1
         var currentOldCount = 0
@@ -207,10 +205,22 @@ object UnifiedDiffParser {
         var hunkDeleted = 0
         var hunkDetectedMethod: String? = null
         var hunkSignatureText: String? = null
+        var hunkHasHeaderTransactional = false
+        val hunkChangedLines = mutableListOf<String>()
         var inHunk = false
 
         fun flushCurrentHunk() {
             if (!inHunk) return
+            rawHunkCount++
+            if (hunkChangedLines.isEmpty() || hunkChangedLines.all { isNoiseChangeLine(it) }) {
+                filteredNoiseHunkCount++
+                return
+            }
+
+            if (hunkHasHeaderTransactional) {
+                hasTransactionalChange = true
+            }
+
             val methodFromHeader = extractMethodName(currentHeaderContext)
             val bestMethod = hunkDetectedMethod ?: methodFromHeader
             val displayContext = when {
@@ -250,10 +260,9 @@ object UnifiedDiffParser {
                 hunkDeleted = 0
                 hunkDetectedMethod = null
                 hunkSignatureText = null
-
-                if (currentHeaderContext.contains("@Transactional")) {
-                    hasTransactionalChange = true
-                }
+                hunkHasHeaderTransactional = isSubstantiveCodeLine(currentHeaderContext) &&
+                    stripInlineComment(currentHeaderContext).contains("@Transactional")
+                hunkChangedLines.clear()
                 continue
             }
 
@@ -264,14 +273,21 @@ object UnifiedDiffParser {
                     val code = line.substring(1)
                     hunkAdded++
                     addedTotal++
+                    hunkChangedLines.add(code)
 
-                    if (code.contains("@Transactional")) {
-                        hasTransactionalChange = true
+                    val isSubstantive = isSubstantiveCodeLine(code)
+                    val activeCode = if (isSubstantive) stripInlineComment(code) else ""
+
+                    if (isSubstantive) {
+                        substantiveAddedLines.append(activeCode).append('\n')
+                        if (activeCode.contains("@Transactional")) {
+                            hasTransactionalChange = true
+                        }
                     }
 
                     // Extract method signature from added lines if not yet detected in this hunk
-                    if (hunkDetectedMethod == null) {
-                        val methodName = extractMethodName(code)
+                    if (hunkDetectedMethod == null && isSubstantive) {
+                        val methodName = extractMethodName(activeCode)
                         if (methodName != null) {
                             hunkDetectedMethod = methodName
                             hunkSignatureText = code.trim()
@@ -285,9 +301,9 @@ object UnifiedDiffParser {
                         }
                     }
 
-                    // Extract API endpoints / External URIs
-                    if (shouldExtractApis) {
-                        extractApiHints(summary, code, currentNewLineCursor, apiHints)
+                    // Extract API endpoints / External URIs from substantive code lines
+                    if (isSubstantive && isApiCandidateLine(summary, activeCode)) {
+                        extractApiHints(summary, activeCode, currentNewLineCursor, apiHints)
                     }
 
                     currentNewLineCursor++
@@ -297,7 +313,8 @@ object UnifiedDiffParser {
                     val code = line.substring(1)
                     hunkDeleted++
                     deletedTotal++
-                    if (code.contains("@Transactional")) {
+                    hunkChangedLines.add(code)
+                    if (isSubstantiveCodeLine(code) && stripInlineComment(code).contains("@Transactional")) {
                         hasTransactionalChange = true
                     }
                 }
@@ -309,6 +326,13 @@ object UnifiedDiffParser {
         }
         flushCurrentHunk()
 
+        val onlyImportOrWhitespace = rawHunkCount > 0 && hunks.isEmpty() && filteredNoiseHunkCount > 0
+        val stackTags = if (onlyImportOrWhitespace) {
+            emptySet()
+        } else {
+            LayerClassifier.detectStackTags(substantiveAddedLines.toString(), resolvedPath)
+        }
+
         return FileDiffDetail(
             summary = summary,
             stackTags = stackTags,
@@ -317,8 +341,45 @@ object UnifiedDiffParser {
             deletedLinesTotal = deletedTotal,
             addedComments = addedComments.toList(),
             apiHints = apiHints.distinctBy { "${it.kind}|${it.methodOrAnnotation}|${it.pathOrUri}" },
-            hasTransactionalChange = hasTransactionalChange
+            hasTransactionalChange = hasTransactionalChange,
+            onlyImportOrWhitespaceChanges = onlyImportOrWhitespace
         )
+    }
+
+    private fun isNoiseChangeLine(codeLine: String): Boolean {
+        val trimmed = codeLine.trim()
+        if (trimmed.isEmpty()) return true
+        if (trimmed.startsWith("import ") || trimmed == "import") return true
+        if (trimmed.startsWith("package ") || trimmed == "package") return true
+        return false
+    }
+
+    internal fun isSubstantiveCodeLine(codeLine: String): Boolean {
+        val trimmed = codeLine.trim()
+        if (trimmed.isEmpty()) return false
+        if (trimmed.startsWith("import ") || trimmed == "import") return false
+        if (trimmed.startsWith("package ") || trimmed == "package") return false
+        if (trimmed.startsWith("//") || trimmed.startsWith("/*") || trimmed.startsWith("*") || trimmed.startsWith("*/")) {
+            return false
+        }
+        return true
+    }
+
+    private fun stripInlineComment(codeLine: String): String {
+        val idx = findInlineCommentIndex(codeLine)
+        return if (idx >= 0) codeLine.substring(0, idx) else codeLine
+    }
+
+    private fun isApiCandidateLine(summary: FileSummary, activeCode: String): Boolean {
+        if (summary.primaryLayer == PrimaryLayer.CONTROLLER_API ||
+            summary.primaryLayer == PrimaryLayer.EXTERNAL_MSA_CLIENT
+        ) {
+            return true
+        }
+        return activeCode.contains("@FeignClient") ||
+            activeCode.contains("RestTemplate") ||
+            activeCode.contains("WebClient") ||
+            activeCode.contains("RestClient")
     }
 
     private fun extractPathsFromDiffHeader(header: String): Pair<String, String>? {

@@ -89,10 +89,12 @@ object RationaleAndCheckEngine {
         allStackTags: Set<StackTag>
     ): List<CheckBadge> {
         val badges = linkedSetOf<CheckBadge>()
-        val layers = fileDetails.map { it.summary.primaryLayer }.toSet()
+        // Exclude pure import/whitespace-only files from architecture check badges to prevent false positives
+        val substantiveFiles = fileDetails.filterNot { it.onlyImportOrWhitespaceChanges }
+        val layers = substantiveFiles.map { it.summary.primaryLayer }.toSet()
 
         // [트랜잭션 경계 변경]
-        if (fileDetails.any { it.hasTransactionalChange }) {
+        if (substantiveFiles.any { it.hasTransactionalChange }) {
             badges.add(CheckBadge.TRANSACTION_BOUNDARY)
         }
 
@@ -117,7 +119,7 @@ object RationaleAndCheckEngine {
         }
 
         // [MyBatis/SQL 쿼리 변경]
-        val hasSqlOrMapperXml = fileDetails.any { fd ->
+        val hasSqlOrMapperXml = substantiveFiles.any { fd ->
             val lower = fd.summary.path.lowercase()
             lower.endsWith(".sql") ||
                 lower.endsWith("mapper.xml") ||
@@ -129,8 +131,8 @@ object RationaleAndCheckEngine {
 
         // [API 스펙 변경]
         val hasApiSpecChange = PrimaryLayer.CONTROLLER_API in layers ||
-            fileDetails.any { it.apiHints.isNotEmpty() } ||
-            fileDetails.any { fd ->
+            substantiveFiles.any { it.apiHints.isNotEmpty() } ||
+            substantiveFiles.any { fd ->
                 val lowerName = fd.summary.fileName.lowercase()
                 fd.summary.primaryLayer == PrimaryLayer.EXTERNAL_MSA_CLIENT &&
                     (lowerName.contains("feign") || lowerName.contains("dto") || lowerName.contains("request") || lowerName.contains("response"))

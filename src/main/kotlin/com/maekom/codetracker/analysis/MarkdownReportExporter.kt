@@ -69,11 +69,17 @@ object MarkdownReportExporter {
             for (fd in files) {
                 val tagsStr = if (fd.stackTags.isNotEmpty()) " ${fd.stackTags.joinToString(" ") { it.label }}" else ""
                 appendLine("- `${fd.summary.path}` (${fd.summary.status.label}, +${fd.addedLinesTotal}/-${fd.deletedLinesTotal})$tagsStr")
-                if (fd.skippedLargeOrBinary) {
-                    appendLine("  - _${fd.skipReason}_")
-                } else {
-                    for (h in fd.hunks) {
-                        appendLine("  - 📍 Line ${h.newStartLine} : `${h.displayContext}` (+${h.addedLines}/-${h.deletedLines})")
+                when {
+                    fd.skippedLargeOrBinary -> {
+                        appendLine("  - _${fd.skipReason}_")
+                    }
+                    fd.onlyImportOrWhitespaceChanges -> {
+                        appendLine("  - _import/공백 정리만 포함됨_")
+                    }
+                    else -> {
+                        for (h in fd.hunks) {
+                            appendLine("  - 📍 Line ${h.newStartLine} : `${h.displayContext}` (+${h.addedLines}/-${h.deletedLines})")
+                        }
                     }
                 }
             }

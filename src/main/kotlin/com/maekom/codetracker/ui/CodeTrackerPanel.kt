@@ -13,6 +13,7 @@ import com.intellij.openapi.ui.Messages
 import com.intellij.ui.ColoredTreeCellRenderer
 import com.intellij.ui.JBColor
 import com.intellij.ui.JBSplitter
+import com.intellij.ui.SearchTextField
 import com.intellij.ui.SimpleTextAttributes
 import com.intellij.ui.components.JBCheckBox
 import com.intellij.ui.components.JBLabel
@@ -21,6 +22,7 @@ import com.intellij.ui.components.JBScrollPane
 import com.intellij.ui.components.JBTextField
 import com.intellij.ui.treeStructure.Tree
 import com.intellij.util.ui.JBUI
+import com.intellij.util.ui.WrapLayout
 import com.maekom.codetracker.analysis.EpisodeGrouper
 import com.maekom.codetracker.analysis.MarkdownReportExporter
 import com.maekom.codetracker.analysis.RationaleAndCheckEngine
@@ -42,10 +44,9 @@ import java.awt.BorderLayout
 import java.awt.Color
 import java.awt.Dimension
 import java.awt.FlowLayout
-import java.awt.Font
-import java.awt.GridBagConstraints
-import java.awt.GridBagLayout
 import java.awt.datatransfer.StringSelection
+import java.awt.event.ComponentAdapter
+import java.awt.event.ComponentEvent
 import java.awt.event.KeyAdapter
 import java.awt.event.KeyEvent
 import java.awt.event.MouseAdapter
@@ -55,13 +56,16 @@ import java.time.format.DateTimeFormatter
 import java.time.format.DateTimeParseException
 import java.util.concurrent.ConcurrentHashMap
 import javax.swing.DefaultComboBoxModel
+import javax.swing.Icon
 import javax.swing.JButton
+import javax.swing.JComponent
 import javax.swing.JEditorPane
 import javax.swing.JMenuItem
 import javax.swing.JPanel
 import javax.swing.JPopupMenu
 import javax.swing.JTree
 import javax.swing.SwingUtilities
+import javax.swing.UIManager
 import javax.swing.event.DocumentEvent
 import javax.swing.event.DocumentListener
 import javax.swing.text.html.HTMLEditorKit
@@ -80,29 +84,23 @@ class CodeTrackerPanel(private val project: Project) : JBPanel<CodeTrackerPanel>
         private val TIME_FMT = DateTimeFormatter.ofPattern("HH:mm")
     }
 
-    // Top Title Header Bar Controls
-    private val versionLabel = JBLabel("v${PluginUpdateChecker.getCurrentVersion()}").apply {
-        foreground = JBColor.GRAY
-    }
-    private val checkUpdateButton = JButton("업데이트 확인")
-
     // Top Filter & Action Controls
+    private val topContainer = JPanel(BorderLayout())
     private val repoCombo = ComboBox<RepoOption>()
     private val branchCombo = ComboBox<String>()
-    private val startDateField = JBTextField(LocalDate.now().minusDays(30).format(DATE_FMT), 9)
-    private val endDateField = JBTextField(LocalDate.now().format(DATE_FMT), 9)
+    private val startDateField = JBTextField(LocalDate.now().minusDays(30).format(DATE_FMT), 8)
+    private val endDateField = JBTextField(LocalDate.now().format(DATE_FMT), 8)
     private val authorCombo = ComboBox<String>(DefaultComboBoxModel(arrayOf(AUTHOR_ALL)))
-    private val keywordField = JBTextField(16)
+    private val keywordField = SearchTextField(false)
     private val layerFilterCombo = ComboBox<LayerFilterOption>(
         DefaultComboBoxModel(LayerFilterOption.defaultOptions().toTypedArray())
     )
-    private val excludeMergesCheckBox = JBCheckBox("머지 커밋 제외(--no-merges)", true)
-    private val analyzeButton = JButton("분석 실행")
-    private val copyMarkdownButton = JButton("마크다운 복사")
-    private val refreshReposButton = JButton("새로고침")
+    private val excludeMergesCheckBox = JBCheckBox("머지 제외", true)
+    private val analyzeButton = JButton("실행", AllIcons.Actions.Execute)
+    private val copyMarkdownButton = JButton(AllIcons.Actions.Copy)
 
     // Summary Strip
-    private val summaryLabel = JBLabel("분석 실행 버튼을 눌러 Git 커밋 및 워크플로우를 조회하세요.")
+    private val summaryLabel = JBLabel("실행 버튼을 눌러 Git 커밋 및 워크플로우를 조회하세요.")
 
     // Left Panel: Episode & Commit Timeline Tree
     private val timelineRoot = DefaultMutableTreeNode("Timeline")
@@ -112,8 +110,10 @@ class CodeTrackerPanel(private val project: Project) : JBPanel<CodeTrackerPanel>
     // Right Top Panel: Rationale & Architecture Check
     private val rationalePane = JEditorPane().apply {
         isEditable = false
+        font = UIManager.getFont("Tree.font") ?: JBUI.Fonts.label()
         editorKit = HTMLEditorKit()
         putClientProperty(JEditorPane.HONOR_DISPLAY_PROPERTIES, true)
+        putClientProperty(JEditorPane.W3C_LENGTH_UNITS, true)
         text = RationaleHtmlRenderer.renderPlaceholder(
             "좌측 타임라인에서 커밋을 선택하면 수정 사유(Why), 연관 .md 문서, 아키텍처 체킹 배지가 표시됩니다."
         )
@@ -123,7 +123,7 @@ class CodeTrackerPanel(private val project: Project) : JBPanel<CodeTrackerPanel>
     private val pointerRoot = DefaultMutableTreeNode("Pointers")
     private val pointerModel = DefaultTreeModel(pointerRoot)
     private val pointerTree = Tree(pointerModel)
-    private val openDiffButton = JButton("선택 파일 Diff 보기")
+    private val openDiffButton = JButton(AllIcons.Actions.Diff)
 
     // In-memory state & Phase 2 detail cache (repoRoot::commitHash -> CommitDetail)
     private var currentResult: AnalysisResult? = null
@@ -149,13 +149,44 @@ class CodeTrackerPanel(private val project: Project) : JBPanel<CodeTrackerPanel>
     }
 
     private fun configureControls() {
-        keywordField.emptyText.text = "파일명, 클래스, 테이블, API 키워드 필터"
+        repoCombo.toolTipText = "대상 Git 저장소/모듈"
+        repoCombo.preferredSize = Dimension(JBUI.scale(140), repoCombo.preferredSize.height)
+        repoCombo.maximumSize = Dimension(JBUI.scale(150), repoCombo.preferredSize.height)
+
+        branchCombo.prototypeDisplayValue = "origin/feature-branch"
+        branchCombo.toolTipText = "대상 브랜치"
+        branchCombo.preferredSize = Dimension(JBUI.scale(140), branchCombo.preferredSize.height)
+        branchCombo.maximumSize = Dimension(JBUI.scale(145), branchCombo.preferredSize.height)
+
         startDateField.toolTipText = "시작일 (YYYY-MM-DD)"
         endDateField.toolTipText = "종료일 (YYYY-MM-DD)"
-        repoCombo.preferredSize = Dimension(180, repoCombo.preferredSize.height)
-        branchCombo.preferredSize = Dimension(140, branchCombo.preferredSize.height)
-        authorCombo.preferredSize = Dimension(130, authorCombo.preferredSize.height)
-        layerFilterCombo.preferredSize = Dimension(150, layerFilterCombo.preferredSize.height)
+
+        authorCombo.toolTipText = "작성자 필터"
+        authorCombo.preferredSize = Dimension(JBUI.scale(110), authorCombo.preferredSize.height)
+        authorCombo.maximumSize = Dimension(JBUI.scale(120), authorCombo.preferredSize.height)
+
+        layerFilterCombo.toolTipText = "아키텍처 레이어 필터"
+        layerFilterCombo.preferredSize = Dimension(JBUI.scale(130), layerFilterCombo.preferredSize.height)
+        layerFilterCombo.maximumSize = Dimension(JBUI.scale(140), layerFilterCombo.preferredSize.height)
+
+        keywordField.textEditor.emptyText.text = "클래스/테이블/API"
+        keywordField.textEditor.columns = 12
+        keywordField.toolTipText = "파일명, 클래스, 테이블, API 키워드 필터"
+        keywordField.preferredSize = Dimension(JBUI.scale(150), keywordField.preferredSize.height)
+
+        excludeMergesCheckBox.toolTipText = "머지 커밋 제외 (--no-merges)"
+
+        analyzeButton.toolTipText = "선택 조건으로 Git 워크플로우 분석 실행"
+        analyzeButton.margin = JBUI.insets(2, 6, 2, 8)
+
+        configureIconOnlyButton(
+            copyMarkdownButton,
+            "선택한 커밋의 아키텍처 및 수정 사유 요약을 마크다운으로 클립보드 복사"
+        )
+        configureIconOnlyButton(
+            openDiffButton,
+            "선택한 파일의 표준 Diff 비교 창 열기"
+        )
 
         timelineTree.isRootVisible = false
         timelineTree.showsRootHandles = true
@@ -170,15 +201,29 @@ class CodeTrackerPanel(private val project: Project) : JBPanel<CodeTrackerPanel>
         pointerTree.emptyText.text = "커밋을 선택하면 레이어별 수정 위치 포인터가 표시됩니다."
     }
 
+    private fun configureIconOnlyButton(button: JButton, tooltip: String) {
+        val size = JBUI.size(28, 28)
+        button.text = ""
+        button.toolTipText = tooltip
+        button.margin = JBUI.emptyInsets()
+        button.preferredSize = size
+        button.minimumSize = size
+        button.maximumSize = size
+        button.isFocusable = false
+    }
+
     private fun buildLayout() {
-        val topContainer = JPanel(BorderLayout())
-        val headerAndFilterPanel = JPanel(BorderLayout()).apply {
-            add(buildHeaderBar(), BorderLayout.NORTH)
-            add(buildFilterBar(), BorderLayout.CENTER)
-        }
-        topContainer.add(headerAndFilterPanel, BorderLayout.NORTH)
+        topContainer.add(buildFilterBar(), BorderLayout.CENTER)
         topContainer.add(buildSummaryStrip(), BorderLayout.SOUTH)
         add(topContainer, BorderLayout.NORTH)
+
+        // Recalculate WrapLayout height smoothly whenever tool window width changes
+        addComponentListener(object : ComponentAdapter() {
+            override fun componentResized(e: ComponentEvent?) {
+                topContainer.revalidate()
+                topContainer.repaint()
+            }
+        })
 
         // Right vertical splitter: Rationale (Top) + Smart Pointers (Bottom)
         val rightTopPanel = JPanel(BorderLayout()).apply {
@@ -222,68 +267,41 @@ class CodeTrackerPanel(private val project: Project) : JBPanel<CodeTrackerPanel>
         add(masterDetailSplitter, BorderLayout.CENTER)
     }
 
-    private fun buildHeaderBar(): JPanel {
-        val titleLabel = JBLabel("Maekom Code Tracker").apply {
-            font = font.deriveFont(Font.BOLD, font.size2D + 1f)
-        }
-
-        val rightActions = JPanel(FlowLayout(FlowLayout.RIGHT, 6, 0)).apply {
+    private fun wrapIconControlPair(icon: Icon, tooltip: String, vararg controls: JComponent): JPanel {
+        return JPanel(FlowLayout(FlowLayout.LEFT, 3, 0)).apply {
             isOpaque = false
-            add(versionLabel)
-            add(checkUpdateButton)
-        }
-
-        return JPanel(BorderLayout()).apply {
-            border = JBUI.Borders.compound(
-                JBUI.Borders.customLine(JBColor.border(), 0, 0, 1, 0),
-                JBUI.Borders.empty(3, 8, 4, 4)
-            )
-            add(titleLabel, BorderLayout.WEST)
-            add(rightActions, BorderLayout.EAST)
+            val iconLabel = JBLabel(icon).apply { toolTipText = tooltip }
+            add(iconLabel)
+            controls.forEach { add(it) }
         }
     }
 
     private fun buildFilterBar(): JPanel {
-        val panel = JPanel(GridBagLayout()).apply {
+        return JPanel(WrapLayout(FlowLayout.LEFT, 6, 4)).apply {
             border = JBUI.Borders.empty(2, 2, 4, 2)
-        }
-
-        val row1 = JPanel(FlowLayout(FlowLayout.LEFT, 6, 2)).apply {
-            add(JBLabel("저장소:"))
-            add(repoCombo)
-            add(JBLabel("브랜치:"))
-            add(branchCombo)
-            add(JBLabel("기간:"))
-            add(startDateField)
-            add(JBLabel("~"))
-            add(endDateField)
-            add(JBLabel("작성자:"))
-            add(authorCombo)
-            add(refreshReposButton)
-        }
-
-        val row2 = JPanel(FlowLayout(FlowLayout.LEFT, 6, 2)).apply {
-            add(JBLabel("키워드:"))
+            add(wrapIconControlPair(AllIcons.Nodes.Module, "대상 Git 저장소/모듈", repoCombo))
+            add(wrapIconControlPair(AllIcons.Vcs.Branch, "대상 브랜치", branchCombo))
+            add(
+                wrapIconControlPair(
+                    AllIcons.Vcs.History,
+                    "조회 기간 (YYYY-MM-DD)",
+                    startDateField,
+                    JBLabel("~"),
+                    endDateField
+                )
+            )
+            add(wrapIconControlPair(AllIcons.General.User, "작성자 필터", authorCombo))
+            add(wrapIconControlPair(AllIcons.Actions.GroupByPackage, "아키텍처 레이어 필터", layerFilterCombo))
             add(keywordField)
-            add(JBLabel("레이어/스택:"))
-            add(layerFilterCombo)
             add(excludeMergesCheckBox)
-            add(analyzeButton)
-            add(copyMarkdownButton)
+            add(
+                JPanel(FlowLayout(FlowLayout.LEFT, 4, 0)).apply {
+                    isOpaque = false
+                    add(analyzeButton)
+                    add(copyMarkdownButton)
+                }
+            )
         }
-
-        val gbc = GridBagConstraints().apply {
-            gridx = 0
-            gridy = 0
-            weightx = 1.0
-            fill = GridBagConstraints.HORIZONTAL
-            anchor = GridBagConstraints.WEST
-        }
-        panel.add(row1, gbc)
-        gbc.gridy = 1
-        panel.add(row2, gbc)
-
-        return panel
     }
 
     private fun buildSummaryStrip(): JPanel {
@@ -297,22 +315,20 @@ class CodeTrackerPanel(private val project: Project) : JBPanel<CodeTrackerPanel>
     }
 
     private fun wireListeners() {
-        checkUpdateButton.addActionListener { checkForPluginUpdates() }
-
-        refreshReposButton.addActionListener { loadRepositoriesAsync() }
-
         repoCombo.addActionListener {
-            if (!suppressComboListeners) {
-                val repo = repoCombo.selectedItem as? RepoOption ?: return@addActionListener
+            val repo = repoCombo.selectedItem as? RepoOption
+            repoCombo.toolTipText = repo?.displayName ?: "대상 Git 저장소/모듈"
+            if (!suppressComboListeners && repo != null) {
                 loadBranchesAndAuthorsAsync(repo)
             }
         }
 
         branchCombo.addActionListener {
+            val branch = branchCombo.selectedItem as? String
+            branchCombo.toolTipText = branch ?: "대상 브랜치"
             if (!suppressComboListeners) {
                 val repo = repoCombo.selectedItem as? RepoOption ?: return@addActionListener
-                val branch = branchCombo.selectedItem as? String ?: "HEAD"
-                loadAuthorsAsync(repo, branch)
+                loadAuthorsAsync(repo, branch ?: "HEAD")
             }
         }
 
@@ -321,7 +337,7 @@ class CodeTrackerPanel(private val project: Project) : JBPanel<CodeTrackerPanel>
         copyMarkdownButton.addActionListener { copySelectedAsMarkdown() }
 
         // Real-time client-side filtering for keyword and layer filter
-        keywordField.document.addDocumentListener(object : DocumentListener {
+        keywordField.addDocumentListener(object : DocumentListener {
             override fun insertUpdate(e: DocumentEvent?) = applyClientSideFilter()
             override fun removeUpdate(e: DocumentEvent?) = applyClientSideFilter()
             override fun changedUpdate(e: DocumentEvent?) = applyClientSideFilter()
@@ -440,10 +456,12 @@ class CodeTrackerPanel(private val project: Project) : JBPanel<CodeTrackerPanel>
                     suppressComboListeners = false
 
                     val first = repos.firstOrNull()
+                    repoCombo.toolTipText = first?.displayName ?: "대상 Git 저장소/모듈"
                     if (first != null) {
                         loadBranchesAndAuthorsAsync(first)
                     } else {
                         branchCombo.model = DefaultComboBoxModel(arrayOf("HEAD"))
+                        branchCombo.toolTipText = "HEAD"
                         authorCombo.model = DefaultComboBoxModel(arrayOf(AUTHOR_ALL))
                         summaryLabel.text = "현재 프로젝트에서 Git 저장소를 찾지 못했습니다."
                     }
@@ -468,6 +486,7 @@ class CodeTrackerPanel(private val project: Project) : JBPanel<CodeTrackerPanel>
                     if (project.isDisposed) return@invokeLater
                     suppressComboListeners = true
                     branchCombo.model = DefaultComboBoxModel(branches.toTypedArray())
+                    branchCombo.toolTipText = branches.firstOrNull() ?: "대상 브랜치"
                     val authorItems = arrayOf(AUTHOR_ALL) + authors.toTypedArray()
                     authorCombo.model = DefaultComboBoxModel(authorItems)
                     suppressComboListeners = false
@@ -785,11 +804,17 @@ class CodeTrackerPanel(private val project: Project) : JBPanel<CodeTrackerPanel>
             val layerNode = DefaultMutableTreeNode(LayerGroupNodeData(layer, files.size))
             for (fd in files) {
                 val fileNode = DefaultMutableTreeNode(FileNodeData(fd))
-                if (fd.skippedLargeOrBinary) {
-                    fileNode.add(DefaultMutableTreeNode(fd.skipReason ?: "Diff 파싱 생략"))
-                } else {
-                    for (hunk in fd.hunks) {
-                        fileNode.add(DefaultMutableTreeNode(HunkNodeData(fd, hunk)))
+                when {
+                    fd.skippedLargeOrBinary -> {
+                        fileNode.add(DefaultMutableTreeNode(fd.skipReason ?: "Diff 파싱 생략"))
+                    }
+                    fd.onlyImportOrWhitespaceChanges -> {
+                        fileNode.add(DefaultMutableTreeNode("import/공백 정리만 포함됨"))
+                    }
+                    else -> {
+                        for (hunk in fd.hunks) {
+                            fileNode.add(DefaultMutableTreeNode(HunkNodeData(fd, hunk)))
+                        }
                     }
                 }
                 layerNode.add(fileNode)
@@ -840,10 +865,8 @@ class CodeTrackerPanel(private val project: Project) : JBPanel<CodeTrackerPanel>
         )
     }
 
-    private fun checkForPluginUpdates() {
-        checkUpdateButton.isEnabled = false
-        val originalText = checkUpdateButton.text
-        checkUpdateButton.text = "확인 중..."
+    fun triggerUpdateCheck(versionLabel: JBLabel? = null, triggerButton: JButton? = null) {
+        triggerButton?.isEnabled = false
 
         ProgressManager.getInstance().run(object : Task.Backgroundable(
             project,
@@ -856,9 +879,8 @@ class CodeTrackerPanel(private val project: Project) : JBPanel<CodeTrackerPanel>
 
                 ApplicationManager.getApplication().invokeLater {
                     if (project.isDisposed) return@invokeLater
-                    checkUpdateButton.isEnabled = true
-                    checkUpdateButton.text = originalText
-                    versionLabel.text = "v${result.currentVersion}"
+                    triggerButton?.isEnabled = true
+                    versionLabel?.text = "v${result.currentVersion}"
 
                     when (result) {
                         is UpdateCheckResult.UpdateAvailable -> {
@@ -937,10 +959,9 @@ class CodeTrackerPanel(private val project: Project) : JBPanel<CodeTrackerPanel>
         }
 
         CopyPasteManager.getInstance().setContents(StringSelection(markdown))
-        val prevText = copyMarkdownButton.text
-        copyMarkdownButton.text = "복사 완료!"
-        javax.swing.Timer(1500) {
-            copyMarkdownButton.text = prevText
+        copyMarkdownButton.icon = AllIcons.Actions.Checked
+        javax.swing.Timer(1200) {
+            copyMarkdownButton.icon = AllIcons.Actions.Copy
         }.apply { isRepeats = false; start() }
     }
 
