@@ -162,7 +162,17 @@ class FileHistoryDialog private constructor(
     private val entrypointsPanel = EntrypointsSectionPanel(project) {
         if (::outerDetailScrollPane.isInitialized) outerDetailScrollPane else null
     }
-    private val sideEffectRadarPanel = SideEffectRadarPanel { alert -> navigateToWorkspacePointer(alert.hunkPointer) }
+    private val sideEffectRadarPanel = SideEffectRadarPanel(
+        onAlertLeftClick = { alert ->
+            val entry = selectedEntry ?: return@SideEffectRadarPanel
+            openEntryDiff(entry, alert.hunkPointer, alert)
+        },
+        onAlertJumpToEditor = { alert ->
+            val entry = selectedEntry ?: return@SideEffectRadarPanel
+            val fileSummary = entry.toFileSummary().copy(path = targetFilePath)
+            CodeNavigator.navigateToRadarInWorkspace(project, repoRootPath, entry.commit, fileSummary, alert)
+        }
+    )
     private val rationalePane = JEditorPane().apply {
         isEditable = false
         alignmentX = Component.LEFT_ALIGNMENT
@@ -514,7 +524,13 @@ class FileHistoryDialog private constructor(
                     val path = pointerTree.getPathForLocation(e.x, e.y) ?: return
                     val node = path.lastPathComponent as? DefaultMutableTreeNode ?: return
                     val obj = node.userObject as? PointerHunkNodeData ?: return
-                    navigateToWorkspacePointer(obj.pointer)
+                    val radarAlert = obj.pointer.primaryRadarAlert
+                    val entry = selectedEntry
+                    if (radarAlert != null && entry != null) {
+                        openEntryDiff(entry, obj.pointer, radarAlert)
+                    } else {
+                        navigateToWorkspacePointer(obj.pointer)
+                    }
                 }
             }
 
@@ -545,7 +561,13 @@ class FileHistoryDialog private constructor(
                 if (e.keyCode == KeyEvent.VK_ENTER) {
                     val node = pointerTree.lastSelectedPathComponent as? DefaultMutableTreeNode ?: return
                     val obj = node.userObject as? PointerHunkNodeData ?: return
-                    navigateToWorkspacePointer(obj.pointer)
+                    val radarAlert = obj.pointer.primaryRadarAlert
+                    val entry = selectedEntry
+                    if (radarAlert != null && entry != null) {
+                        openEntryDiff(entry, obj.pointer, radarAlert)
+                    } else {
+                        navigateToWorkspacePointer(obj.pointer)
+                    }
                 }
             }
         })
@@ -820,13 +842,18 @@ class FileHistoryDialog private constructor(
         }
     }
 
-    private fun openEntryDiff(entry: FileHistoryCommitEntry, targetPointer: CodeHunkPointer?) {
+    private fun openEntryDiff(
+        entry: FileHistoryCommitEntry,
+        targetPointer: CodeHunkPointer?,
+        radarAlert: com.maekom.codetracker.model.SideEffectAlert? = null
+    ) {
         CodeNavigator.showCommitFileDiff(
             project = project,
             repoRootPath = repoRootPath,
             commit = entry.commit,
             file = entry.toFileSummary(),
-            targetPointer = targetPointer
+            targetPointer = targetPointer,
+            radarAlert = radarAlert
         )
     }
 

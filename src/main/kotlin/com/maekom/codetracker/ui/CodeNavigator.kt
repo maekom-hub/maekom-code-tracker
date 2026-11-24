@@ -23,6 +23,7 @@ import com.maekom.codetracker.model.CodeHunkPointer
 import com.maekom.codetracker.model.CommitSummary
 import com.maekom.codetracker.model.FileChangeStatus
 import com.maekom.codetracker.model.FileSummary
+import com.maekom.codetracker.model.SideEffectAlert
 import java.nio.charset.StandardCharsets
 import java.nio.file.Files
 import java.nio.file.Path
@@ -35,6 +36,89 @@ import kotlin.math.abs
 object CodeNavigator {
 
     private const val SNIPPET_SEARCH_WINDOW = 50
+    private val WHITESPACE_REGEX = Regex("""\s+""")
+
+    /**
+     * Right-click action on a Side-Effect Radar item:
+     * Searches the current workspace file for `riskCodeSnippet` (whitespace-normalized) first,
+     * then enclosing method / MyBatis XML tag ID. If the risky code was already deleted/changed,
+     * notifies the user and opens the commit's Before / After Diff viewer scrolled to the exact line.
+     */
+    fun navigateToRadarInWorkspace(
+        project: Project,
+        repoRootPath: String,
+        commit: CommitSummary,
+        file: FileSummary,
+        alert: SideEffectAlert
+    ) {
+        val targetPath = Path.of(repoRootPath, file.path).normalize()
+        val virtualFile = LocalFileSystem.getInstance().refreshAndFindFileByNioFile(targetPath)
+
+        if (file.status == FileChangeStatus.DELETED || virtualFile == null || !virtualFile.exists() || virtualFile.isDirectory) {
+            Messages.showInfoMessage(
+                project,
+                CodeTrackerI18n.radarCodeMissingInWorkspace(file.fileName),
+                "Maekom Code Tracker"
+            )
+            showCommitFileDiff(project, repoRootPath, commit, file, alert.hunkPointer, alert)
+            return
+        }
+
+        val lines = readWorkspaceLines(virtualFile, targetPath)
+        if (lines.isEmpty()) {
+            Messages.showInfoMessage(
+                project,
+                CodeTrackerI18n.radarCodeMissingInWorkspace(file.fileName),
+                "Maekom Code Tracker"
+            )
+            showCommitFileDiff(project, repoRootPath, commit, file, alert.hunkPointer, alert)
+            return
+        }
+
+        val anchorZeroBased = (alert.exactRiskNewLine - 1).coerceIn(0, lines.lastIndex)
+
+        // Priority 1: Normalized whitespace search for riskCodeSnippet
+        val normalizedSnippet = alert.riskCodeSnippet
+            ?.let { WHITESPACE_REGEX.replace(it.trim(), " ") }
+            ?.takeIf { it.length >= 4 }
+        if (normalizedSnippet != null) {
+            val exactMatches = mutableListOf<Int>()
+            val containsMatches = mutableListOf<Int>()
+            lines.forEachIndexed { idx, line ->
+                val normLine = WHITESPACE_REGEX.replace(line.trim(), " ")
+                if (normLine == normalizedSnippet) {
+                    exactMatches.add(idx)
+                } else if (normLine.contains(normalizedSnippet)) {
+                    containsMatches.add(idx)
+                }
+            }
+            val hit = exactMatches.minByOrNull { abs(it - anchorZeroBased) }
+                ?: containsMatches.minByOrNull { abs(it - anchorZeroBased) }
+            if (hit != null) {
+                OpenFileDescriptor(project, virtualFile, hit, 0).navigate(true)
+                return
+            }
+        }
+
+        // Priority 2: Enclosing method / MyBatis XML query ID
+        val methodLine = findClosestMethodLineZeroBased(
+            lines = lines,
+            detectedMethodName = alert.hunkPointer.detectedMethodName,
+            anchorZeroBased = anchorZeroBased
+        )
+        if (methodLine != null) {
+            OpenFileDescriptor(project, virtualFile, methodLine.coerceIn(0, lines.lastIndex), 0).navigate(true)
+            return
+        }
+
+        // Neither snippet nor method found in current file -> inform user & open commit Diff
+        Messages.showInfoMessage(
+            project,
+            CodeTrackerI18n.radarCodeMissingInWorkspace(file.fileName),
+            "Maekom Code Tracker"
+        )
+        showCommitFileDiff(project, repoRootPath, commit, file, alert.hunkPointer, alert)
+    }
 
     fun navigateToAbsoluteFileLine(
         project: Project,
@@ -190,7 +274,8 @@ object CodeNavigator {
         repoRootPath: String,
         commit: CommitSummary,
         file: FileSummary,
-        targetPointer: CodeHunkPointer? = null
+        targetPointer: CodeHunkPointer? = null,
+        radarAlert: SideEffectAlert? = null
     ) {
         ProgressManager.getInstance().run(object : Task.Backgroundable(
             project,
@@ -237,7 +322,18 @@ object CodeNavigator {
                         beforeLabel,
                         afterLabel
                     )
-                    if (targetPointer != null) {
+                    if (radarAlert != null) {
+                        val side = if (radarAlert.preferLeftSide) Side.LEFT else Side.RIGHT
+                        val targetLine1Based = if (radarAlert.preferLeftSide) {
+                            radarAlert.exactRiskOldLine
+                        } else {
+                            radarAlert.exactRiskNewLine
+                        }
+                        request.putUserData(
+                            DiffUserDataKeys.SCROLL_TO_LINE,
+                            IntelliJPair.create(side, (targetLine1Based - 1).coerceAtLeast(0))
+                        )
+                    } else if (targetPointer != null) {
                         request.putUserData(
                             DiffUserDataKeys.SCROLL_TO_LINE,
                             IntelliJPair.create(Side.RIGHT, (targetPointer.newStartLine - 1).coerceAtLeast(0))

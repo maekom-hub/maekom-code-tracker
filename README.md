@@ -48,6 +48,7 @@ PostgreSQL(JPA + MyBatis), Redis, MongoDB 및 외부 MSA/레거시 API 연동이
 <!-- VERSION_HISTORY_START -->
 | 버전 | 릴리즈 날짜 | 주요 변경 요약 | 다운로드 |
 | --- | --- | --- | --- |
+| `v0.2.4` | 2026-11-24 | 백엔드 장애 위험 레이더 정확한 라인(좌/우 사이드) 매핑 및 클릭 시 Diff 비교 자동 스크롤 연동 | [maekom-code-tracker-0.2.4.zip](https://github.com/maekom-hub/maekom-code-tracker/releases/download/v0.2.4/maekom-code-tracker-0.2.4.zip) |
 | `v0.2.3` | 2026-11-24 | 상세 패널 통합 스크롤 구조 개편(하단 정보 잘림 수정) 및 엔트리포인트 4줄 스크롤 연동 | [maekom-code-tracker-0.2.3.zip](https://github.com/maekom-hub/maekom-code-tracker/releases/download/v0.2.3/maekom-code-tracker-0.2.3.zip) |
 | `v0.2.2` | 2026-11-24 | 상단 요약 바 기간 내 이슈 번호별 커밋 건수 집계 표시 추가 | [maekom-code-tracker-0.2.2.zip](https://github.com/maekom-hub/maekom-code-tracker/releases/download/v0.2.2/maekom-code-tracker-0.2.2.zip) |
 | `v0.2.1` | 2026-11-24 | API/Batch 엔트리포인트 역추적, 아키텍처 실행 흐름도 재조립 뷰, 트랜잭션·쿼리 실무 위험도 레이더 추가 | [maekom-code-tracker-0.2.1.zip](https://github.com/maekom-hub/maekom-code-tracker/releases/download/v0.2.1/maekom-code-tracker-0.2.1.zip) |

@@ -44,7 +44,7 @@ sealed class UpdateCheckResult(val currentVersion: String) {
 object PluginUpdateChecker {
 
     private const val PLUGIN_ID = "com.maekom.codetracker"
-    private const val FALLBACK_VERSION = "0.2.3"
+    private const val FALLBACK_VERSION = "0.2.4"
     const val CUSTOM_REPO_URL =
         "https://github.com/maekom-hub/maekom-code-tracker/releases/latest/download/updatePlugins.xml"
     private const val USER_AGENT = "Maekom-Code-Tracker"

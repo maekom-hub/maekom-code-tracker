@@ -185,7 +185,10 @@ class CodeTrackerPanel(
     private val entrypointsPanel = EntrypointsSectionPanel(project) {
         if (::outerDetailScrollPane.isInitialized) outerDetailScrollPane else null
     }
-    private val sideEffectRadarPanel = SideEffectRadarPanel { alert -> navigateToRadarAlert(alert) }
+    private val sideEffectRadarPanel = SideEffectRadarPanel(
+        onAlertLeftClick = { alert -> openRadarDiff(alert) },
+        onAlertJumpToEditor = { alert -> jumpToRadarInEditor(alert) }
+    )
     private val rationalePane = JEditorPane().apply {
         isEditable = false
         alignmentX = Component.LEFT_ALIGNMENT
@@ -636,7 +639,12 @@ class CodeTrackerPanel(
                     when (val obj = node.userObject) {
                         is HunkNodeData -> {
                             if (e.clickCount >= 1) {
-                                navigateToFileOrHunk(obj.fileDetail, obj.pointer, obj.overrideCommit)
+                                val radarAlert = obj.pointer.primaryRadarAlert
+                                if (radarAlert != null) {
+                                    openRadarDiff(radarAlert)
+                                } else {
+                                    navigateToFileOrHunk(obj.fileDetail, obj.pointer, obj.overrideCommit)
+                                }
                             }
                         }
                         is PointerMdNoteNodeData -> {
@@ -701,30 +709,48 @@ class CodeTrackerPanel(
                 val alert = merged?.sideEffectAlerts?.getOrNull(idx)
                     ?: detail?.sideEffectAlerts?.getOrNull(idx)
                     ?: return
-                navigateToRadarAlert(alert)
+                openRadarDiff(alert)
             }
         }
     }
 
-    private fun navigateToRadarAlert(alert: SideEffectAlert) {
-        val result = currentResult ?: return
-        val repoRoot = result.filter.repo.rootPath
+    private fun resolveCommitAndFileForAlert(alert: SideEffectAlert): Pair<CommitSummary, com.maekom.codetracker.model.FileSummary>? {
         val merged = selectedMergedDetail
         val detail = selectedDetail
         val commit = merged?.commitSections?.firstOrNull { it.commit.hash == alert.commitHash }?.commit
+            ?: currentResult?.commits?.firstOrNull { it.hash == alert.commitHash }
             ?: merged?.commitSections?.firstOrNull()?.commit
             ?: selectedCommit
-            ?: return
+            ?: return null
         val fileSummary = detail?.fileDetails?.firstOrNull { it.summary.path == alert.filePath }?.summary
-            ?: merged?.commitSections?.firstOrNull { it.fileDetail.summary.path == alert.filePath }?.fileDetail?.summary
+            ?: merged?.commitSections?.firstOrNull { it.commit.hash == commit.hash && it.fileDetail.summary.path == alert.filePath }?.fileDetail?.summary
             ?: commit.files.firstOrNull { it.path == alert.filePath }
-            ?: return
-        CodeNavigator.navigateToPointer(
+            ?: return null
+        return commit to fileSummary
+    }
+
+    private fun openRadarDiff(alert: SideEffectAlert) {
+        val result = currentResult ?: return
+        val (commit, fileSummary) = resolveCommitAndFileForAlert(alert) ?: return
+        CodeNavigator.showCommitFileDiff(
             project = project,
-            repoRootPath = repoRoot,
+            repoRootPath = result.filter.repo.rootPath,
             commit = commit,
             file = fileSummary,
-            pointer = alert.hunkPointer
+            targetPointer = alert.hunkPointer,
+            radarAlert = alert
+        )
+    }
+
+    private fun jumpToRadarInEditor(alert: SideEffectAlert) {
+        val result = currentResult ?: return
+        val (commit, fileSummary) = resolveCommitAndFileForAlert(alert) ?: return
+        CodeNavigator.navigateToRadarInWorkspace(
+            project = project,
+            repoRootPath = result.filter.repo.rootPath,
+            commit = commit,
+            file = fileSummary,
+            alert = alert
         )
     }
 
@@ -771,10 +797,16 @@ class CodeTrackerPanel(
             popup.addSeparator()
         }
         popup.add(JMenuItem(CodeTrackerI18n.menuDiffCompare()).apply {
-            addActionListener { openDiff(fileDetail, pointer, overrideCommit) }
+            addActionListener {
+                val radarAlert = pointer?.primaryRadarAlert
+                if (radarAlert != null) openRadarDiff(radarAlert) else openDiff(fileDetail, pointer, overrideCommit)
+            }
         })
-        popup.add(JMenuItem(CodeTrackerI18n.menuJumpToCode()).apply {
-            addActionListener { navigateToFileOrHunk(fileDetail, pointer, overrideCommit) }
+        popup.add(JMenuItem(CodeTrackerI18n.menuJumpToCurrentEditor()).apply {
+            addActionListener {
+                val radarAlert = pointer?.primaryRadarAlert
+                if (radarAlert != null) jumpToRadarInEditor(radarAlert) else navigateToFileOrHunk(fileDetail, pointer, overrideCommit)
+            }
         })
         popup.addSeparator()
         popup.add(JMenuItem(CodeTrackerI18n.menuCopyCommitMarkdown()).apply {

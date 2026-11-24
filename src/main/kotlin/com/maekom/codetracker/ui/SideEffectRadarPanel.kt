@@ -17,7 +17,9 @@ import java.awt.Rectangle
 import java.awt.event.MouseAdapter
 import java.awt.event.MouseEvent
 import javax.swing.BoxLayout
+import javax.swing.JMenuItem
 import javax.swing.JPanel
+import javax.swing.JPopupMenu
 import javax.swing.JTextArea
 import javax.swing.Scrollable
 import javax.swing.SwingUtilities
@@ -46,10 +48,12 @@ class ScrollableDetailContainer : JPanel(), Scrollable {
 /**
  * Block 2 inside the unified detail scroll pane: Side-Effect Risk Radar card.
  * Completely hidden (`isVisible = false`) when 0 alerts exist.
- * Clicking any alert row jumps directly to the exact offending hunk line.
+ * - Left-click: Opens Before / After commit Diff scrolled to the exact risk line (Side.LEFT / Side.RIGHT).
+ * - Right-click: Context menu to jump to the matching code snippet in the current editor.
  */
 class SideEffectRadarPanel(
-    private val onAlertClicked: (SideEffectAlert) -> Unit
+    private val onAlertLeftClick: (SideEffectAlert) -> Unit,
+    private val onAlertJumpToEditor: (SideEffectAlert) -> Unit
 ) : JPanel(BorderLayout()) {
 
     private var currentAlerts: List<SideEffectAlert> = emptyList()
@@ -134,11 +138,16 @@ class SideEffectRadarPanel(
                 JBColor(Color(0xF5D099), Color(0x7A5A28))
             )
         }
+        val tooltip = CodeTrackerI18n.radarItemTooltip()
+        val sideTag = if (alert.preferLeftSide) "Before" else "After"
 
-        val badgeLabel = JBLabel("${alert.severity.localizedBadge()} ${alert.rule.localizedTitle()} (${alert.fileName}:${alert.hunkPointer.newStartLine})").apply {
+        val badgeLabel = JBLabel(
+            "${alert.severity.localizedBadge()} ${alert.rule.localizedTitle()} (${alert.fileName}:${alert.displayLineNumber()} $sideTag)"
+        ).apply {
             font = textFont.deriveFont(Font.BOLD)
             foreground = badgeColor
             alignmentX = Component.LEFT_ALIGNMENT
+            toolTipText = tooltip
             cursor = Cursor.getPredefinedCursor(Cursor.HAND_CURSOR)
         }
 
@@ -152,6 +161,7 @@ class SideEffectRadarPanel(
             foreground = UIUtil.getLabelForeground()
             border = JBUI.Borders.empty(1, 0, 0, 0)
             alignmentX = Component.LEFT_ALIGNMENT
+            toolTipText = tooltip
             cursor = Cursor.getPredefinedCursor(Cursor.HAND_CURSOR)
         }
 
@@ -167,21 +177,37 @@ class SideEffectRadarPanel(
                     JBUI.Borders.empty(3, 6, 3, 6)
                 )
             )
+            toolTipText = tooltip
             cursor = Cursor.getPredefinedCursor(Cursor.HAND_CURSOR)
             add(badgeLabel)
             add(detailArea)
         }
 
-        val clickListener = object : MouseAdapter() {
+        val mouseListener = object : MouseAdapter() {
             override fun mouseClicked(e: MouseEvent) {
                 if (SwingUtilities.isLeftMouseButton(e)) {
-                    onAlertClicked(alert)
+                    onAlertLeftClick(alert)
                 }
             }
+
+            override fun mousePressed(e: MouseEvent) = maybeShowPopup(e)
+            override fun mouseReleased(e: MouseEvent) = maybeShowPopup(e)
+
+            private fun maybeShowPopup(e: MouseEvent) {
+                if (!e.isPopupTrigger) return
+                val popup = JPopupMenu()
+                popup.add(JMenuItem(CodeTrackerI18n.menuDiffCompare()).apply {
+                    addActionListener { onAlertLeftClick(alert) }
+                })
+                popup.add(JMenuItem(CodeTrackerI18n.menuJumpToCurrentEditor()).apply {
+                    addActionListener { onAlertJumpToEditor(alert) }
+                })
+                popup.show(e.component, e.x, e.y)
+            }
         }
-        row.addMouseListener(clickListener)
-        badgeLabel.addMouseListener(clickListener)
-        detailArea.addMouseListener(clickListener)
+        row.addMouseListener(mouseListener)
+        badgeLabel.addMouseListener(mouseListener)
+        detailArea.addMouseListener(mouseListener)
 
         return row
     }

@@ -301,8 +301,17 @@ object CodeTrackerI18n {
 
     // ---- v0.2.0: Side-Effect Risk Radar ----
     fun sideEffectRadarTitle(): String = tr(
-        "백엔드 장애 위험 레이더 (클릭: 해당 라인 이동)",
-        "Backend Side-Effect Risk Radar (Click to Jump)"
+        "백엔드 장애 위험 레이더 (클릭: 커밋 Diff 비교)",
+        "Backend Side-Effect Risk Radar (Click: Open Commit Diff)"
+    )
+    fun radarItemTooltip(): String = tr(
+        "클릭: 커밋 Diff 비교 창에서 해당 변경 라인 보기 | 우클릭: 현재 에디터 코드로 이동",
+        "Click: Open commit Diff at this line | Right-click: Jump to current editor"
+    )
+    fun menuJumpToCurrentEditor(): String = tr("현재 에디터 코드로 이동", "Jump to Current Editor")
+    fun radarCodeMissingInWorkspace(fileName: String): String = tr(
+        "'$fileName'의 해당 위험 코드가 현재 워크스페이스에서 이미 삭제되었거나 변경되었습니다.\n해당 커밋의 Before / After Diff 창으로 확인합니다.",
+        "The flagged code in '$fileName' no longer exists in the current workspace.\nOpening the commit Before / After Diff viewer instead."
     )
     fun radarBadgeHigh(): String = tr("[위험 HIGH]", "[HIGH RISK]")
     fun radarBadgeWarn(): String = tr("[주의 WARN]", "[WARN]")

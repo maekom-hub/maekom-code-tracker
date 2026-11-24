@@ -276,14 +276,19 @@ enum class SideEffectRule(val severity: RadarSeverity) {
 data class SideEffectAlert(
     val severity: RadarSeverity,
     val rule: SideEffectRule,
+    val commitHash: String,
     val filePath: String,
     val fileName: String,
     val hunkPointer: CodeHunkPointer,
+    val exactRiskNewLine: Int,
+    val exactRiskOldLine: Int,
+    val preferLeftSide: Boolean,
+    val riskCodeSnippet: String? = null,
     val detailKo: String,
-    val detailEn: String,
-    val commitHash: String? = null
+    val detailEn: String
 ) {
     fun localizedDetail(): String = CodeTrackerI18n.tr(detailKo, detailEn)
+    fun displayLineNumber(): Int = if (preferLeftSide) exactRiskOldLine else exactRiskNewLine
 }
 
 enum class ExecutionFlowStage(val order: Int) {
@@ -392,7 +397,10 @@ data class CodeHunkPointer(
     val matchedMdShortNote: String? = null,
     val matchedMdFullNote: String? = null,
     val rawDiffLines: List<String> = emptyList(),
-    val highestRadarSeverity: RadarSeverity? = null
+    val highestRadarSeverity: RadarSeverity? = null,
+    val hunkHeaderOldStartLine: Int = oldStartLine,
+    val hunkHeaderNewStartLine: Int = newStartLine,
+    val primaryRadarAlert: SideEffectAlert? = null
 )
 
 data class ApiEndpointHint(

@@ -248,7 +248,9 @@ object UnifiedDiffParser {
                     addedLines = hunkAdded,
                     deletedLines = hunkDeleted,
                     firstChangedCodeLine = firstChangedCodeLine,
-                    rawDiffLines = hunkRawLines.toList()
+                    rawDiffLines = hunkRawLines.toList(),
+                    hunkHeaderOldStartLine = currentOldStart.coerceAtLeast(1),
+                    hunkHeaderNewStartLine = currentNewStart.coerceAtLeast(1)
                 )
             )
         }
