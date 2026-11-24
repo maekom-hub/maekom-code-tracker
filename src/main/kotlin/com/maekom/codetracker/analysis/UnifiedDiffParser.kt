@@ -1,5 +1,6 @@
 package com.maekom.codetracker.analysis
 
+import com.maekom.codetracker.i18n.CodeTrackerI18n
 import com.maekom.codetracker.model.ApiEndpointHint
 import com.maekom.codetracker.model.CodeHunkPointer
 import com.maekom.codetracker.model.FileChangeStatus
@@ -166,7 +167,7 @@ object UnifiedDiffParser {
                 apiHints = emptyList(),
                 hasTransactionalChange = false,
                 skippedLargeOrBinary = true,
-                skipReason = "바이너리 파일 (Diff 파싱 생략)"
+                skipReason = CodeTrackerI18n.binarySkipText()
             )
         }
 
@@ -181,7 +182,7 @@ object UnifiedDiffParser {
                 apiHints = emptyList(),
                 hasTransactionalChange = false,
                 skippedLargeOrBinary = true,
-                skipReason = "1MB 초과 대용량 Diff (파싱 생략)"
+                skipReason = CodeTrackerI18n.largeDiffSkipText()
             )
         }
 
@@ -230,7 +231,7 @@ object UnifiedDiffParser {
                 !hunkSignatureText.isNullOrBlank() -> hunkSignatureText!!
                 currentHeaderContext.isNotBlank() -> currentHeaderContext
                 !bestMethod.isNullOrBlank() -> bestMethod
-                else -> "변경 블록"
+                else -> CodeTrackerI18n.fallbackBlockContext()
             }
             val effectiveNewStartLine = (firstNonBlankChangedLine ?: firstAnyChangedLine ?: currentNewStart).coerceAtLeast(1)
             hunks.add(

@@ -1,5 +1,6 @@
 package com.maekom.codetracker.model
 
+import com.maekom.codetracker.i18n.CodeTrackerI18n
 import java.time.LocalDate
 import java.time.LocalDateTime
 
@@ -32,37 +33,58 @@ enum class StackTag(val label: String, val relatedLayer: PrimaryLayer) {
     override fun toString(): String = label
 }
 
-enum class CheckBadge(val label: String, val description: String, val severity: BadgeSeverity) {
+enum class CheckBadge(
+    val label: String,
+    val labelEn: String,
+    val description: String,
+    val descriptionEn: String,
+    val severity: BadgeSeverity
+) {
     TRANSACTION_BOUNDARY(
         "[트랜잭션 경계 변경]",
+        "[Transaction Boundary Changed]",
         "@Transactional 추가/수정/옵션 변경이 감지되었습니다.",
+        "@Transactional addition, modification, or option change detected.",
         BadgeSeverity.HIGH
     ),
     EXTERNAL_API_AND_DB_MIXED(
         "[외부 API + DB 혼합 주의]",
+        "[External API + DB Mixed Caution]",
         "동일 커밋 내 Service/RDB 변경과 외부 MSA/레거시 API 호출이 함께 수정되었습니다.",
+        "Service/RDB changes and external MSA/legacy API calls were modified in the same commit.",
         BadgeSeverity.HIGH
     ),
     REDIS_CACHE_KEY_CHANGE(
         "[Redis 캐시/키 변경]",
+        "[Redis Cache/Key Changed]",
         "@Cacheable/@CacheEvict 또는 RedisTemplate 키·TTL 조작 변경이 감지되었습니다.",
+        "@Cacheable/@CacheEvict or RedisTemplate key/TTL manipulation detected.",
         BadgeSeverity.MEDIUM
     ),
     MONGO_SCHEMA_QUERY_CHANGE(
         "[MongoDB 스키마/쿼리 변경]",
+        "[MongoDB Schema/Query Changed]",
         "@Document, MongoTemplate, Criteria 관련 변경이 감지되었습니다.",
+        "@Document, MongoTemplate, or Criteria changes detected.",
         BadgeSeverity.MEDIUM
     ),
     MYBATIS_SQL_QUERY_CHANGE(
         "[MyBatis/SQL 쿼리 변경]",
+        "[MyBatis/SQL Query Changed]",
         "SQL 스크립트 또는 MyBatis XML 매퍼 변경이 감지되었습니다.",
+        "SQL script or MyBatis XML mapper changes detected.",
         BadgeSeverity.MEDIUM
     ),
     API_SPEC_CHANGE(
         "[API 스펙 변경]",
+        "[API Spec Changed]",
         "Controller 또는 Feign/Client 엔드포인트·DTO 변경이 감지되었습니다.",
+        "Controller or Feign/Client endpoint/DTO changes detected.",
         BadgeSeverity.INFO
-    )
+    );
+
+    fun localizedLabel(): String = CodeTrackerI18n.tr(label, labelEn)
+    fun localizedDescription(): String = CodeTrackerI18n.tr(description, descriptionEn)
 }
 
 enum class BadgeSeverity {
@@ -71,14 +93,16 @@ enum class BadgeSeverity {
     INFO
 }
 
-enum class FileChangeStatus(val code: String, val label: String) {
-    ADDED("A", "추가"),
-    MODIFIED("M", "수정"),
-    DELETED("D", "삭제"),
-    RENAMED("R", "이름변경"),
-    COPIED("C", "복사"),
-    TYPE_CHANGED("T", "타입변경"),
-    UNKNOWN("?", "변경");
+enum class FileChangeStatus(val code: String, val label: String, val labelEn: String) {
+    ADDED("A", "추가", "Added"),
+    MODIFIED("M", "수정", "Modified"),
+    DELETED("D", "삭제", "Deleted"),
+    RENAMED("R", "이름변경", "Renamed"),
+    COPIED("C", "복사", "Copied"),
+    TYPE_CHANGED("T", "타입변경", "Type Changed"),
+    UNKNOWN("?", "변경", "Changed");
+
+    fun localizedLabel(): String = CodeTrackerI18n.tr(label, labelEn)
 
     companion object {
         fun fromGitCode(raw: String): FileChangeStatus {
@@ -99,16 +123,23 @@ enum class FileChangeStatus(val code: String, val label: String) {
 data class RepoOption(
     val displayName: String,
     val rootPath: String,
-    val moduleSubPath: String? = null
+    val moduleSubPath: String? = null,
+    val repoName: String = displayName
 ) {
-    override fun toString(): String = displayName
+    fun localizedDisplayName(): String = if (moduleSubPath.isNullOrBlank()) {
+        "$repoName (${CodeTrackerI18n.allOption()})"
+    } else {
+        "$repoName / $moduleSubPath"
+    }
+
+    override fun toString(): String = localizedDisplayName()
 }
 
 data class LayerFilterOption(
     val label: String,
     val layer: PrimaryLayer?
 ) {
-    override fun toString(): String = label
+    override fun toString(): String = if (layer == null) CodeTrackerI18n.allOption() else label
 
     companion object {
         val ALL = LayerFilterOption("전체", null)

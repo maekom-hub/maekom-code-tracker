@@ -33,6 +33,7 @@ import com.maekom.codetracker.analysis.EpisodeGrouper
 import com.maekom.codetracker.analysis.MarkdownReportExporter
 import com.maekom.codetracker.analysis.RationaleAndCheckEngine
 import com.maekom.codetracker.git.GitRepositoryService
+import com.maekom.codetracker.i18n.CodeTrackerI18n
 import com.maekom.codetracker.model.AnalysisFilter
 import com.maekom.codetracker.model.AnalysisResult
 import com.maekom.codetracker.model.CodeHunkPointer
@@ -63,7 +64,6 @@ import java.time.format.DateTimeParseException
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicBoolean
 import javax.swing.DefaultComboBoxModel
-import javax.swing.Icon
 import javax.swing.JButton
 import javax.swing.JComponent
 import javax.swing.JEditorPane
@@ -79,10 +79,12 @@ import javax.swing.event.DocumentListener
 import javax.swing.text.html.HTMLEditorKit
 import javax.swing.tree.DefaultMutableTreeNode
 import javax.swing.tree.DefaultTreeModel
+import javax.swing.tree.TreePath
 import javax.swing.tree.TreeSelectionModel
 
 /**
  * Main Master-Detail UI panel for Maekom Code Tracker Tool Window.
+ * Supports zero-restart live KO/EN language switching while preserving selection & tree state.
  */
 class CodeTrackerPanel(
     private val project: Project,
@@ -90,28 +92,50 @@ class CodeTrackerPanel(
 ) : JBPanel<CodeTrackerPanel>(BorderLayout()), Disposable {
 
     companion object {
-        private const val AUTHOR_ALL = "전체"
         private val DATE_FMT = DateTimeFormatter.ISO_LOCAL_DATE
         private val TIME_FMT = DateTimeFormatter.ofPattern("HH:mm")
     }
 
+    private data class AuthorOption(val rawName: String?) {
+        override fun toString(): String = rawName ?: CodeTrackerI18n.allOption()
+
+        companion object {
+            val ALL = AuthorOption(null)
+        }
+    }
+
     // Top Filter & Action Controls
     private val topContainer = JPanel(BorderLayout())
+    private val repoIconLabel = JBLabel(AllIcons.Nodes.Module)
+    private val branchIconLabel = JBLabel(AllIcons.Vcs.Branch)
+    private val dateIconLabel = JBLabel(AllIcons.Vcs.History)
+    private val authorIconLabel = JBLabel(AllIcons.General.User)
+    private val layerIconLabel = JBLabel(AllIcons.Actions.GroupByPackage)
+
     private val repoCombo = ComboBox<RepoOption>()
     private val branchCombo = ComboBox<String>()
     private val startDateField = JBTextField(LocalDate.now().minusDays(30).format(DATE_FMT), 8)
     private val endDateField = JBTextField(LocalDate.now().format(DATE_FMT), 8)
-    private val authorCombo = ComboBox<String>(DefaultComboBoxModel(arrayOf(AUTHOR_ALL)))
+    private val authorCombo = ComboBox<AuthorOption>(DefaultComboBoxModel(arrayOf(AuthorOption.ALL)))
     private val keywordField = SearchTextField(false)
     private val layerFilterCombo = ComboBox<LayerFilterOption>(
         DefaultComboBoxModel(LayerFilterOption.defaultOptions().toTypedArray())
     )
-    private val excludeMergesCheckBox = JBCheckBox("머지 제외", true)
-    private val analyzeButton = JButton("실행", AllIcons.Actions.Execute)
+    private val excludeMergesCheckBox = JBCheckBox(CodeTrackerI18n.excludeMergesLabel(), true)
+    private val analyzeButton = JButton(CodeTrackerI18n.runButtonLabel(), AllIcons.Actions.Execute)
     private val copyMarkdownButton = JButton(AllIcons.Actions.Copy)
 
+    // Panel Headers
+    private val leftHeaderLabel = JBLabel(CodeTrackerI18n.timelinePanelTitle()).apply {
+        border = JBUI.Borders.empty(4, 4, 4, 4)
+    }
+    private val rightTopHeaderLabel = JBLabel(CodeTrackerI18n.rationalePanelTitle()).apply {
+        border = JBUI.Borders.empty(4, 4, 4, 4)
+    }
+    private val rightBottomHeaderLabel = JBLabel(CodeTrackerI18n.pointerPanelTitle())
+
     // Summary Strip
-    private val summaryLabel = JBLabel("실행 버튼을 눌러 Git 커밋 및 워크플로우를 조회하세요.")
+    private val summaryLabel = JBLabel(CodeTrackerI18n.initialSummaryText())
 
     // Left Panel: Episode & Commit Timeline Tree
     private val timelineRoot = DefaultMutableTreeNode("Timeline")
@@ -125,9 +149,7 @@ class CodeTrackerPanel(
         editorKit = HTMLEditorKit()
         putClientProperty(JEditorPane.HONOR_DISPLAY_PROPERTIES, true)
         putClientProperty(JEditorPane.W3C_LENGTH_UNITS, true)
-        text = RationaleHtmlRenderer.renderPlaceholder(
-            "좌측 타임라인에서 커밋을 선택하면 수정 사유(Why), 연관 .md 문서, 아키텍처 체킹 배지가 표시됩니다."
-        )
+        text = RationaleHtmlRenderer.renderPlaceholder(CodeTrackerI18n.rationaleInitialPlaceholder())
     }
 
     // Right Bottom Panel: Smart Location Pointer Tree
@@ -138,6 +160,8 @@ class CodeTrackerPanel(
 
     // In-memory state & Phase 2 detail cache (repoRoot::commitHash -> CommitDetail)
     private var currentResult: AnalysisResult? = null
+    private var lastFilteredCommits: List<CommitSummary> = emptyList()
+    private var lastRepoCount: Int = -1
     private var selectedCommit: CommitSummary? = null
     private var selectedEpisode: WorkEpisode? = null
     private var selectedDetail: CommitDetail? = null
@@ -168,6 +192,7 @@ class CodeTrackerPanel(
         configureControls()
         buildLayout()
         wireListeners()
+        CodeTrackerI18n.addListener(this) { applyLocalization() }
         registerRepositoryLifecycleHooks()
         initRepositoriesAsync()
     }
@@ -177,58 +202,126 @@ class CodeTrackerPanel(
     }
 
     private fun configureControls() {
-        repoCombo.toolTipText = "대상 Git 저장소/모듈"
         repoCombo.preferredSize = Dimension(JBUI.scale(140), repoCombo.preferredSize.height)
         repoCombo.maximumSize = Dimension(JBUI.scale(150), repoCombo.preferredSize.height)
 
         branchCombo.prototypeDisplayValue = "origin/feature-branch"
-        branchCombo.toolTipText = "대상 브랜치"
         branchCombo.preferredSize = Dimension(JBUI.scale(140), branchCombo.preferredSize.height)
         branchCombo.maximumSize = Dimension(JBUI.scale(145), branchCombo.preferredSize.height)
 
-        startDateField.toolTipText = "시작일 (YYYY-MM-DD)"
-        endDateField.toolTipText = "종료일 (YYYY-MM-DD)"
-
-        authorCombo.toolTipText = "작성자 필터"
         authorCombo.preferredSize = Dimension(JBUI.scale(110), authorCombo.preferredSize.height)
         authorCombo.maximumSize = Dimension(JBUI.scale(120), authorCombo.preferredSize.height)
 
-        layerFilterCombo.toolTipText = "아키텍처 레이어 필터"
         layerFilterCombo.preferredSize = Dimension(JBUI.scale(130), layerFilterCombo.preferredSize.height)
         layerFilterCombo.maximumSize = Dimension(JBUI.scale(140), layerFilterCombo.preferredSize.height)
 
-        keywordField.textEditor.emptyText.text = "클래스/테이블/API"
         keywordField.textEditor.columns = 12
-        keywordField.toolTipText = "파일명, 클래스, 테이블, API 키워드 필터"
         keywordField.preferredSize = Dimension(JBUI.scale(150), keywordField.preferredSize.height)
 
-        excludeMergesCheckBox.toolTipText = "머지 커밋 제외 (--no-merges)"
-
-        analyzeButton.toolTipText = "선택 조건으로 Git 워크플로우 분석 실행"
         analyzeButton.margin = JBUI.insets(2, 6, 2, 8)
 
-        configureIconOnlyButton(
-            copyMarkdownButton,
-            "선택한 커밋의 아키텍처 및 수정 사유 요약을 마크다운으로 클립보드 복사"
-        )
-        configureIconOnlyButton(
-            openDiffButton,
-            "선택한 파일의 표준 Diff 비교 창 열기"
-        )
+        configureIconOnlyButton(copyMarkdownButton, CodeTrackerI18n.copyMarkdownTooltip())
+        configureIconOnlyButton(openDiffButton, CodeTrackerI18n.openDiffTooltip())
 
         timelineTree.isRootVisible = false
         timelineTree.showsRootHandles = true
         timelineTree.selectionModel.selectionMode = TreeSelectionModel.SINGLE_TREE_SELECTION
         timelineTree.cellRenderer = TimelineTreeCellRenderer()
-        timelineTree.emptyText.text = "표시할 커밋이 없습니다."
 
         pointerTree.isRootVisible = false
         pointerTree.showsRootHandles = true
         pointerTree.toggleClickCount = 0
         pointerTree.selectionModel.selectionMode = TreeSelectionModel.SINGLE_TREE_SELECTION
         pointerTree.cellRenderer = PointerTreeCellRenderer()
-        pointerTree.emptyText.text = "커밋을 선택하면 레이어별 수정 위치 포인터가 표시됩니다."
         ToolTipManager.sharedInstance().registerComponent(pointerTree)
+
+        applyStaticTexts()
+    }
+
+    private fun applyStaticTexts() {
+        repoIconLabel.toolTipText = CodeTrackerI18n.repoTooltip()
+        branchIconLabel.toolTipText = CodeTrackerI18n.branchTooltip()
+        dateIconLabel.toolTipText = CodeTrackerI18n.dateRangeTooltip()
+        authorIconLabel.toolTipText = CodeTrackerI18n.authorTooltip()
+        layerIconLabel.toolTipText = CodeTrackerI18n.layerTooltip()
+
+        val selectedRepo = repoCombo.selectedItem as? RepoOption
+        repoCombo.toolTipText = selectedRepo?.localizedDisplayName() ?: CodeTrackerI18n.repoTooltip()
+        val selectedBranch = branchCombo.selectedItem as? String
+        branchCombo.toolTipText = selectedBranch ?: CodeTrackerI18n.branchTooltip()
+
+        startDateField.toolTipText = CodeTrackerI18n.startDateTooltip()
+        endDateField.toolTipText = CodeTrackerI18n.endDateTooltip()
+        authorCombo.toolTipText = CodeTrackerI18n.authorTooltip()
+        layerFilterCombo.toolTipText = CodeTrackerI18n.layerTooltip()
+
+        keywordField.textEditor.emptyText.text = CodeTrackerI18n.keywordEmptyText()
+        keywordField.toolTipText = CodeTrackerI18n.keywordTooltip()
+        excludeMergesCheckBox.text = CodeTrackerI18n.excludeMergesLabel()
+        excludeMergesCheckBox.toolTipText = CodeTrackerI18n.excludeMergesTooltip()
+        analyzeButton.text = CodeTrackerI18n.runButtonLabel()
+        analyzeButton.toolTipText = CodeTrackerI18n.runButtonTooltip()
+        copyMarkdownButton.toolTipText = CodeTrackerI18n.copyMarkdownTooltip()
+        openDiffButton.toolTipText = CodeTrackerI18n.openDiffTooltip()
+
+        leftHeaderLabel.text = CodeTrackerI18n.timelinePanelTitle()
+        rightTopHeaderLabel.text = CodeTrackerI18n.rationalePanelTitle()
+        rightBottomHeaderLabel.text = CodeTrackerI18n.pointerPanelTitle()
+
+        timelineTree.emptyText.text = CodeTrackerI18n.timelineEmptyText()
+        pointerTree.emptyText.text = CodeTrackerI18n.pointerEmptyText()
+    }
+
+    /**
+     * Zero-restart live localization update preserving all combo selections,
+     * tree expansion states, and currently selected commit/pointer.
+     */
+    private fun applyLocalization() {
+        if (project.isDisposed) return
+
+        applyStaticTexts()
+
+        // Repaint combo boxes so dynamic toString() ("전체" <-> "All") refreshes without changing selected index
+        repoCombo.revalidate()
+        repoCombo.repaint()
+        authorCombo.revalidate()
+        authorCombo.repaint()
+        layerFilterCombo.revalidate()
+        layerFilterCombo.repaint()
+
+        // Refresh summary strip
+        val result = currentResult
+        if (result != null) {
+            updateSummaryStrip(lastFilteredCommits, result.filter.repo.rootPath, result.truncatedToLimit)
+        } else {
+            summaryLabel.text = if (lastRepoCount == 0) {
+                CodeTrackerI18n.noGitRepoFound()
+            } else {
+                CodeTrackerI18n.initialSummaryText()
+            }
+        }
+
+        // Refresh left timeline tree labels without collapsing/deselecting
+        timelineTree.revalidate()
+        timelineTree.repaint()
+
+        // Re-render right rationale & smart pointer tree preserving expansion and selection
+        val detail = selectedDetail
+        if (detail != null) {
+            rationalePane.text = RationaleHtmlRenderer.renderCommitDetail(detail)
+            rationalePane.caretPosition = 0
+            rebuildPointerTreePreservingState(detail)
+        } else {
+            val placeholder = when {
+                result == null -> CodeTrackerI18n.rationaleInitialPlaceholder()
+                result.commits.isEmpty() -> CodeTrackerI18n.rationaleNoCommitsPlaceholder()
+                else -> CodeTrackerI18n.rationaleSelectCommitPlaceholder()
+            }
+            rationalePane.text = RationaleHtmlRenderer.renderPlaceholder(placeholder)
+        }
+
+        topContainer.revalidate()
+        topContainer.repaint()
     }
 
     private fun configureIconOnlyButton(button: JButton, tooltip: String) {
@@ -247,7 +340,6 @@ class CodeTrackerPanel(
         topContainer.add(buildSummaryStrip(), BorderLayout.SOUTH)
         add(topContainer, BorderLayout.NORTH)
 
-        // Recalculate WrapLayout height smoothly whenever tool window width changes
         addComponentListener(object : ComponentAdapter() {
             override fun componentResized(e: ComponentEvent?) {
                 topContainer.revalidate()
@@ -258,10 +350,7 @@ class CodeTrackerPanel(
         // Right vertical splitter: Rationale (Top) + Smart Pointers (Bottom)
         val rightTopPanel = JPanel(BorderLayout()).apply {
             border = JBUI.Borders.customLine(JBColor.border(), 1)
-            val header = JBLabel("  수정 사유 & 아키텍처 체킹 패널").apply {
-                border = JBUI.Borders.empty(4, 4, 4, 4)
-            }
-            add(header, BorderLayout.NORTH)
+            add(rightTopHeaderLabel, BorderLayout.NORTH)
             add(JBScrollPane(rationalePane), BorderLayout.CENTER)
         }
 
@@ -269,7 +358,7 @@ class CodeTrackerPanel(
             border = JBUI.Borders.customLine(JBColor.border(), 1)
             val headerBar = JPanel(BorderLayout()).apply {
                 border = JBUI.Borders.empty(2, 6, 2, 4)
-                add(JBLabel("스마트 위치 포인터 (클릭: 코드 이동 / 우클릭: Diff 비교)"), BorderLayout.WEST)
+                add(rightBottomHeaderLabel, BorderLayout.WEST)
                 add(openDiffButton, BorderLayout.EAST)
             }
             add(headerBar, BorderLayout.NORTH)
@@ -283,10 +372,7 @@ class CodeTrackerPanel(
 
         val leftPanel = JPanel(BorderLayout()).apply {
             border = JBUI.Borders.customLine(JBColor.border(), 1)
-            val header = JBLabel("  작업 에피소드 & 커밋 타임라인").apply {
-                border = JBUI.Borders.empty(4, 4, 4, 4)
-            }
-            add(header, BorderLayout.NORTH)
+            add(leftHeaderLabel, BorderLayout.NORTH)
             add(JBScrollPane(timelineTree), BorderLayout.CENTER)
         }
 
@@ -297,10 +383,9 @@ class CodeTrackerPanel(
         add(masterDetailSplitter, BorderLayout.CENTER)
     }
 
-    private fun wrapIconControlPair(icon: Icon, tooltip: String, vararg controls: JComponent): JPanel {
+    private fun wrapIconControlPair(iconLabel: JBLabel, vararg controls: JComponent): JPanel {
         return JPanel(FlowLayout(FlowLayout.LEFT, 3, 0)).apply {
             isOpaque = false
-            val iconLabel = JBLabel(icon).apply { toolTipText = tooltip }
             add(iconLabel)
             controls.forEach { add(it) }
         }
@@ -309,19 +394,11 @@ class CodeTrackerPanel(
     private fun buildFilterBar(): JPanel {
         return JPanel(WrapLayout(FlowLayout.LEFT, 6, 4)).apply {
             border = JBUI.Borders.empty(2, 2, 4, 2)
-            add(wrapIconControlPair(AllIcons.Nodes.Module, "대상 Git 저장소/모듈", repoCombo))
-            add(wrapIconControlPair(AllIcons.Vcs.Branch, "대상 브랜치", branchCombo))
-            add(
-                wrapIconControlPair(
-                    AllIcons.Vcs.History,
-                    "조회 기간 (YYYY-MM-DD)",
-                    startDateField,
-                    JBLabel("~"),
-                    endDateField
-                )
-            )
-            add(wrapIconControlPair(AllIcons.General.User, "작성자 필터", authorCombo))
-            add(wrapIconControlPair(AllIcons.Actions.GroupByPackage, "아키텍처 레이어 필터", layerFilterCombo))
+            add(wrapIconControlPair(repoIconLabel, repoCombo))
+            add(wrapIconControlPair(branchIconLabel, branchCombo))
+            add(wrapIconControlPair(dateIconLabel, startDateField, JBLabel("~"), endDateField))
+            add(wrapIconControlPair(authorIconLabel, authorCombo))
+            add(wrapIconControlPair(layerIconLabel, layerFilterCombo))
             add(keywordField)
             add(excludeMergesCheckBox)
             add(
@@ -347,7 +424,7 @@ class CodeTrackerPanel(
     private fun wireListeners() {
         repoCombo.addActionListener {
             val repo = repoCombo.selectedItem as? RepoOption
-            repoCombo.toolTipText = repo?.displayName ?: "대상 Git 저장소/모듈"
+            repoCombo.toolTipText = repo?.localizedDisplayName() ?: CodeTrackerI18n.repoTooltip()
             if (!suppressComboListeners && repo != null) {
                 loadBranchesAndAuthorsAsync(repo)
             }
@@ -355,7 +432,7 @@ class CodeTrackerPanel(
 
         branchCombo.addActionListener {
             val branch = branchCombo.selectedItem as? String
-            branchCombo.toolTipText = branch ?: "대상 브랜치"
+            branchCombo.toolTipText = branch ?: CodeTrackerI18n.branchTooltip()
             if (!suppressComboListeners) {
                 val repo = repoCombo.selectedItem as? RepoOption ?: return@addActionListener
                 loadAuthorsAsync(repo, branch ?: "HEAD")
@@ -403,7 +480,7 @@ class CodeTrackerPanel(
             }
         }
 
-        // Pointer tree click -> smart code navigation; right-click -> popup menu
+        // Pointer tree click -> smart code navigation / file history dialog; right-click -> popup menu
         pointerTree.addMouseListener(object : MouseAdapter() {
             override fun mouseClicked(e: MouseEvent) {
                 if (SwingUtilities.isLeftMouseButton(e)) {
@@ -478,19 +555,19 @@ class CodeTrackerPanel(
 
         val popup = JPopupMenu()
         if (node.userObject is FileNodeData) {
-            popup.add(JMenuItem("이 파일의 기간 내 수정 이력 보기").apply {
+            popup.add(JMenuItem(CodeTrackerI18n.menuFileHistory()).apply {
                 addActionListener { openFileHistoryDialog(fileDetail) }
             })
             popup.addSeparator()
         }
-        popup.add(JMenuItem("Before / After Diff 비교").apply {
+        popup.add(JMenuItem(CodeTrackerI18n.menuDiffCompare()).apply {
             addActionListener { openDiff(fileDetail, pointer) }
         })
-        popup.add(JMenuItem("워크스페이스 코드 위치로 이동").apply {
+        popup.add(JMenuItem(CodeTrackerI18n.menuJumpToCode()).apply {
             addActionListener { navigateToFileOrHunk(fileDetail, pointer) }
         })
         popup.addSeparator()
-        popup.add(JMenuItem("이 커밋 마크다운 복사").apply {
+        popup.add(JMenuItem(CodeTrackerI18n.menuCopyCommitMarkdown()).apply {
             addActionListener { copySelectedAsMarkdown() }
         })
         popup.show(pointerTree, e.x, e.y)
@@ -499,7 +576,11 @@ class CodeTrackerPanel(
     private fun openFileHistoryDialog(fileDetail: FileDiffDetail) {
         val repo = currentResult?.filter?.repo ?: (repoCombo.selectedItem as? RepoOption)
         if (repo == null) {
-            Messages.showWarningDialog(project, "대상 Git 저장소 정보를 찾을 수 없습니다.", "Maekom Code Tracker")
+            Messages.showWarningDialog(
+                project,
+                CodeTrackerI18n.tr("대상 Git 저장소 정보를 찾을 수 없습니다.", "Target Git repository not found."),
+                "Maekom Code Tracker"
+            )
             return
         }
         val branch = currentResult?.filter?.branch
@@ -572,7 +653,7 @@ class CodeTrackerPanel(
 
         val prevRepo = repoCombo.selectedItem as? RepoOption
         val prevBranch = branchCombo.selectedItem as? String
-        val prevAuthor = authorCombo.selectedItem as? String
+        val prevAuthorRaw = (authorCombo.selectedItem as? AuthorOption)?.rawName
         val (startDate, endDate) = parseDateRangeLenient()
 
         ApplicationManager.getApplication().executeOnPooledThread {
@@ -612,32 +693,30 @@ class CodeTrackerPanel(
                 ApplicationManager.getApplication().invokeLater {
                     try {
                         if (project.isDisposed) return@invokeLater
+                        lastRepoCount = repos.size
                         suppressComboListeners = true
 
                         repoCombo.model = DefaultComboBoxModel(repos.toTypedArray())
                         if (targetRepo != null) {
                             repoCombo.selectedItem = targetRepo
-                            repoCombo.toolTipText = targetRepo.displayName
+                            repoCombo.toolTipText = targetRepo.localizedDisplayName()
                         } else {
-                            repoCombo.toolTipText = "대상 Git 저장소/모듈"
+                            repoCombo.toolTipText = CodeTrackerI18n.repoTooltip()
                         }
 
                         branchCombo.model = DefaultComboBoxModel(branches.toTypedArray())
                         branchCombo.selectedItem = targetBranch
                         branchCombo.toolTipText = targetBranch
 
-                        val authorItems = arrayOf(AUTHOR_ALL) + authors.toTypedArray()
+                        val authorItems = (listOf(AuthorOption.ALL) + authors.map { AuthorOption(it) }).toTypedArray()
                         authorCombo.model = DefaultComboBoxModel(authorItems)
-                        if (prevAuthor != null && authorItems.contains(prevAuthor)) {
-                            authorCombo.selectedItem = prevAuthor
-                        } else {
-                            authorCombo.selectedItem = AUTHOR_ALL
-                        }
+                        val preservedAuthor = authorItems.firstOrNull { it.rawName == prevAuthorRaw } ?: AuthorOption.ALL
+                        authorCombo.selectedItem = preservedAuthor
 
                         if (repos.isEmpty() && currentResult == null) {
-                            summaryLabel.text = "현재 프로젝트에서 Git 저장소를 찾지 못했습니다."
+                            summaryLabel.text = CodeTrackerI18n.noGitRepoFound()
                         } else if (repos.isNotEmpty() && currentResult == null) {
-                            summaryLabel.text = "실행 버튼을 눌러 Git 커밋 및 워크플로우를 조회하세요."
+                            summaryLabel.text = CodeTrackerI18n.initialSummaryText()
                         }
                     } finally {
                         suppressComboListeners = false
@@ -664,7 +743,7 @@ class CodeTrackerPanel(
     private fun loadBranchesAndAuthorsAsync(repo: RepoOption) {
         val (startDate, endDate) = parseDateRangeLenient()
         val prevBranch = branchCombo.selectedItem as? String
-        val prevAuthor = authorCombo.selectedItem as? String
+        val prevAuthorRaw = (authorCombo.selectedItem as? AuthorOption)?.rawName
 
         ApplicationManager.getApplication().executeOnPooledThread {
             val branches = GitRepositoryService.listBranches(project, repo.rootPath)
@@ -694,13 +773,10 @@ class CodeTrackerPanel(
                     branchCombo.selectedItem = targetBranch
                     branchCombo.toolTipText = targetBranch
 
-                    val authorItems = arrayOf(AUTHOR_ALL) + authors.toTypedArray()
+                    val authorItems = (listOf(AuthorOption.ALL) + authors.map { AuthorOption(it) }).toTypedArray()
                     authorCombo.model = DefaultComboBoxModel(authorItems)
-                    if (prevAuthor != null && authorItems.contains(prevAuthor)) {
-                        authorCombo.selectedItem = prevAuthor
-                    } else {
-                        authorCombo.selectedItem = AUTHOR_ALL
-                    }
+                    val preservedAuthor = authorItems.firstOrNull { it.rawName == prevAuthorRaw } ?: AuthorOption.ALL
+                    authorCombo.selectedItem = preservedAuthor
                 } finally {
                     suppressComboListeners = false
                 }
@@ -710,7 +786,7 @@ class CodeTrackerPanel(
 
     private fun loadAuthorsAsync(repo: RepoOption, branch: String) {
         val (startDate, endDate) = parseDateRangeLenient()
-        val prevAuthor = authorCombo.selectedItem as? String
+        val prevAuthorRaw = (authorCombo.selectedItem as? AuthorOption)?.rawName
 
         ApplicationManager.getApplication().executeOnPooledThread {
             val authors = GitRepositoryService.loadRecentAuthors(
@@ -733,13 +809,10 @@ class CodeTrackerPanel(
                 }
                 suppressComboListeners = true
                 try {
-                    val authorItems = arrayOf(AUTHOR_ALL) + authors.toTypedArray()
+                    val authorItems = (listOf(AuthorOption.ALL) + authors.map { AuthorOption(it) }).toTypedArray()
                     authorCombo.model = DefaultComboBoxModel(authorItems)
-                    if (prevAuthor != null && authorItems.contains(prevAuthor)) {
-                        authorCombo.selectedItem = prevAuthor
-                    } else {
-                        authorCombo.selectedItem = AUTHOR_ALL
-                    }
+                    val preservedAuthor = authorItems.firstOrNull { it.rawName == prevAuthorRaw } ?: AuthorOption.ALL
+                    authorCombo.selectedItem = preservedAuthor
                 } finally {
                     suppressComboListeners = false
                 }
@@ -756,7 +829,11 @@ class CodeTrackerPanel(
     private fun runPhase1Analysis() {
         val repo = repoCombo.selectedItem as? RepoOption
         if (repo == null) {
-            Messages.showWarningDialog(project, "분석할 Git 저장소가 선택되지 않았습니다.", "Maekom Code Tracker")
+            Messages.showWarningDialog(
+                project,
+                CodeTrackerI18n.tr("분석할 Git 저장소가 선택되지 않았습니다.", "No Git repository selected."),
+                "Maekom Code Tracker"
+            )
             return
         }
 
@@ -768,8 +845,11 @@ class CodeTrackerPanel(
         } catch (e: DateTimeParseException) {
             Messages.showErrorDialog(
                 project,
-                "날짜 형식이 올바르지 않습니다. YYYY-MM-DD 형식으로 입력해 주세요.\n(예: 2026-01-01)",
-                "날짜 형식 오류"
+                CodeTrackerI18n.tr(
+                    "날짜 형식이 올바르지 않습니다. YYYY-MM-DD 형식으로 입력해 주세요.\n(예: 2026-01-01)",
+                    "Invalid date format. Please use YYYY-MM-DD.\n(e.g., 2026-01-01)"
+                ),
+                CodeTrackerI18n.tr("날짜 형식 오류", "Invalid Date Format")
             )
             return
         }
@@ -777,15 +857,17 @@ class CodeTrackerPanel(
         if (startDate.isAfter(endDate)) {
             Messages.showErrorDialog(
                 project,
-                "시작일($startDate)은 종료일($endDate)보다 이후일 수 없습니다.",
-                "날짜 범위 오류"
+                CodeTrackerI18n.tr(
+                    "시작일($startDate)은 종료일($endDate)보다 이후일 수 없습니다.",
+                    "Start date ($startDate) cannot be after end date ($endDate)."
+                ),
+                CodeTrackerI18n.tr("날짜 범위 오류", "Invalid Date Range")
             )
             return
         }
 
         val branch = (branchCombo.selectedItem as? String)?.ifBlank { "HEAD" } ?: "HEAD"
-        val selectedAuthorRaw = authorCombo.selectedItem as? String
-        val author = if (selectedAuthorRaw.isNullOrBlank() || selectedAuthorRaw == AUTHOR_ALL) null else selectedAuthorRaw
+        val author = (authorCombo.selectedItem as? AuthorOption)?.rawName
         val layerFilter = (layerFilterCombo.selectedItem as? LayerFilterOption)?.layer
 
         val filter = AnalysisFilter(
@@ -800,11 +882,14 @@ class CodeTrackerPanel(
         )
 
         analyzeButton.isEnabled = false
-        summaryLabel.text = "1단계 Git 커밋 이력 조회 중 (최대 ${GitRepositoryService.MAX_COMMITS}커밋)..."
+        summaryLabel.text = CodeTrackerI18n.tr(
+            "1단계 Git 커밋 이력 조회 중 (최대 ${GitRepositoryService.MAX_COMMITS}커밋)...",
+            "Stage 1: Fetching Git commit history (up to ${GitRepositoryService.MAX_COMMITS} commits)..."
+        )
 
         ProgressManager.getInstance().run(object : Task.Backgroundable(
             project,
-            "Maekom Code Tracker: 커밋 타임라인 분석 중",
+            CodeTrackerI18n.tr("Maekom Code Tracker: 커밋 타임라인 분석 중", "Maekom Code Tracker: Analyzing commit timeline"),
             true
         ) {
             override fun run(indicator: ProgressIndicator) {
@@ -833,21 +918,20 @@ class CodeTrackerPanel(
                         selectedEpisode = null
                         selectedDetail = null
 
-                        // Update author dropdown when querying all authors
                         if (author == null && refreshedAuthors.isNotEmpty()) {
                             suppressComboListeners = true
-                            val items = arrayOf(AUTHOR_ALL) + refreshedAuthors.toTypedArray()
+                            val items = (listOf(AuthorOption.ALL) + refreshedAuthors.map { AuthorOption(it) }).toTypedArray()
                             authorCombo.model = DefaultComboBoxModel(items)
-                            authorCombo.selectedItem = AUTHOR_ALL
+                            authorCombo.selectedItem = AuthorOption.ALL
                             suppressComboListeners = false
                         }
 
                         applyClientSideFilter()
                         rationalePane.text = RationaleHtmlRenderer.renderPlaceholder(
                             if (rawCommits.isEmpty()) {
-                                "조회된 커밋이 없습니다. 브랜치, 기간, 작성자 필터를 확인해 주세요."
+                                CodeTrackerI18n.rationaleNoCommitsPlaceholder()
                             } else {
-                                "좌측 타임라인에서 커밋을 선택하면 상세 Diff 분석 및 수정 사유가 표시됩니다."
+                                CodeTrackerI18n.rationaleSelectCommitPlaceholder()
                             }
                         )
                         clearPointerTree()
@@ -856,10 +940,13 @@ class CodeTrackerPanel(
                     ApplicationManager.getApplication().invokeLater {
                         if (project.isDisposed) return@invokeLater
                         analyzeButton.isEnabled = true
-                        summaryLabel.text = "분석 오류: ${e.message}"
+                        summaryLabel.text = CodeTrackerI18n.tr("분석 오류: ${e.message}", "Analysis error: ${e.message}")
                         Messages.showErrorDialog(
                             project,
-                            "Git 이력 분석 중 오류가 발생했습니다:\n${e.message}",
+                            CodeTrackerI18n.tr(
+                                "Git 이력 분석 중 오류가 발생했습니다:\n${e.message}",
+                                "An error occurred while analyzing Git history:\n${e.message}"
+                            ),
                             "Maekom Code Tracker"
                         )
                     }
@@ -890,6 +977,7 @@ class CodeTrackerPanel(
             matchesKeyword && matchesLayer
         }
 
+        lastFilteredCommits = filteredCommits
         val filteredEpisodes = EpisodeGrouper.groupIntoEpisodes(filteredCommits)
         rebuildTimelineTree(filteredEpisodes)
         updateSummaryStrip(filteredCommits, result.filter.repo.rootPath, result.truncatedToLimit)
@@ -905,9 +993,10 @@ class CodeTrackerPanel(
             timelineRoot.add(epNode)
         }
         timelineModel.reload()
-        // Expand all episode nodes for immediate visibility
-        for (i in 0 until timelineTree.rowCount) {
-            timelineTree.expandRow(i)
+        var row = 0
+        while (row < timelineTree.rowCount) {
+            timelineTree.expandRow(row)
+            row++
         }
     }
 
@@ -925,7 +1014,6 @@ class CodeTrackerPanel(
                 "${layer.displayName} ${pct}%($count)"
             }
 
-        // Aggregate detected stack tags from already analyzed commits in cache
         val stackCounts = linkedMapOf<StackTag, Int>()
         for (c in commits) {
             val detail = detailCache["$repoRootPath::${c.hash}"] ?: continue
@@ -934,16 +1022,20 @@ class CodeTrackerPanel(
             }
         }
         val stackStr = if (stackCounts.isNotEmpty()) {
-            "  ||  스택: " + stackCounts.entries.sortedByDescending { it.value }
+            stackCounts.entries.sortedByDescending { it.value }
                 .joinToString(" ") { "${it.key.label}(${it.value})" }
         } else {
             ""
         }
 
-        val limitSuffix = if (truncated) " [최대 ${GitRepositoryService.MAX_COMMITS}커밋 제한]" else ""
-        summaryLabel.text = "총 커밋: ${totalCommits}건 | 수정 파일: ${totalFiles}건$limitSuffix" +
-            (if (layerRatioStr.isNotBlank()) "  ||  $layerRatioStr" else "") +
-            stackStr
+        summaryLabel.text = CodeTrackerI18n.summaryStrip(
+            totalCommits = totalCommits,
+            totalFiles = totalFiles,
+            truncated = truncated,
+            maxCommits = GitRepositoryService.MAX_COMMITS,
+            layerRatio = layerRatioStr,
+            stackPart = stackStr
+        )
     }
 
     private fun computeLayerCounts(commits: List<CommitSummary>): Map<PrimaryLayer, Int> {
@@ -976,7 +1068,10 @@ class CodeTrackerPanel(
 
         ProgressManager.getInstance().run(object : Task.Backgroundable(
             project,
-            "Maekom Code Tracker: 커밋 상세 분석 (${commit.shortHash})",
+            CodeTrackerI18n.tr(
+                "Maekom Code Tracker: 커밋 상세 분석 (${commit.shortHash})",
+                "Maekom Code Tracker: Analyzing commit detail (${commit.shortHash})"
+            ),
             true
         ) {
             override fun run(indicator: ProgressIndicator) {
@@ -992,18 +1087,20 @@ class CodeTrackerPanel(
 
                     ApplicationManager.getApplication().invokeLater {
                         if (project.isDisposed) return@invokeLater
-                        // Ensure user hasn't already selected a different commit
                         if (selectedCommit?.hash == commit.hash) {
                             displayCommitDetail(detail)
                         }
-                        updateSummaryStrip(result.commits, repoRootPath, result.truncatedToLimit)
+                        updateSummaryStrip(lastFilteredCommits.ifEmpty { result.commits }, repoRootPath, result.truncatedToLimit)
                     }
                 } catch (e: Exception) {
                     ApplicationManager.getApplication().invokeLater {
                         if (project.isDisposed) return@invokeLater
                         if (selectedCommit?.hash == commit.hash) {
                             rationalePane.text = RationaleHtmlRenderer.renderPlaceholder(
-                                "상세 분석 중 오류가 발생했습니다: ${e.message}"
+                                CodeTrackerI18n.tr(
+                                    "상세 분석 중 오류가 발생했습니다: ${e.message}",
+                                    "Error analyzing commit detail: ${e.message}"
+                                )
                             )
                         }
                     }
@@ -1025,8 +1122,91 @@ class CodeTrackerPanel(
     }
 
     private fun rebuildPointerTree(detail: CommitDetail) {
-        pointerRoot.removeAllChildren()
+        populatePointerTreeNodes(detail)
+        pointerModel.reload()
+        var row = 0
+        while (row < pointerTree.rowCount) {
+            pointerTree.expandRow(row)
+            row++
+        }
+    }
 
+    private fun rebuildPointerTreePreservingState(detail: CommitDetail) {
+        // Capture currently collapsed layer/file keys and selected node key
+        val collapsedLayers = mutableSetOf<PrimaryLayer>()
+        val collapsedFiles = mutableSetOf<String>()
+        for (i in 0 until pointerRoot.childCount) {
+            val layerNode = pointerRoot.getChildAt(i) as? DefaultMutableTreeNode ?: continue
+            val layerObj = layerNode.userObject as? LayerGroupNodeData ?: continue
+            val layerPath = TreePath(layerNode.path)
+            if (!pointerTree.isExpanded(layerPath)) {
+                collapsedLayers.add(layerObj.layer)
+            }
+            for (j in 0 until layerNode.childCount) {
+                val fileNode = layerNode.getChildAt(j) as? DefaultMutableTreeNode ?: continue
+                val fileObj = fileNode.userObject as? FileNodeData ?: continue
+                if (!pointerTree.isExpanded(TreePath(fileNode.path))) {
+                    collapsedFiles.add(fileObj.fileDetail.summary.path)
+                }
+            }
+        }
+        val selectedUserObj = (pointerTree.lastSelectedPathComponent as? DefaultMutableTreeNode)?.userObject
+
+        populatePointerTreeNodes(detail)
+        pointerModel.reload()
+
+        var pathToSelect: TreePath? = null
+        for (i in 0 until pointerRoot.childCount) {
+            val layerNode = pointerRoot.getChildAt(i) as? DefaultMutableTreeNode ?: continue
+            val layerObj = layerNode.userObject as? LayerGroupNodeData ?: continue
+            val layerPath = TreePath(layerNode.path)
+            if (selectedUserObj is LayerGroupNodeData && selectedUserObj.layer == layerObj.layer) {
+                pathToSelect = layerPath
+            }
+            if (layerObj.layer !in collapsedLayers) {
+                pointerTree.expandPath(layerPath)
+            }
+            for (j in 0 until layerNode.childCount) {
+                val fileNode = layerNode.getChildAt(j) as? DefaultMutableTreeNode ?: continue
+                val fileObj = fileNode.userObject as? FileNodeData ?: continue
+                val filePath = TreePath(fileNode.path)
+                if (selectedUserObj is FileNodeData && selectedUserObj.fileDetail.summary.path == fileObj.fileDetail.summary.path) {
+                    pathToSelect = filePath
+                }
+                if (fileObj.fileDetail.summary.path !in collapsedFiles) {
+                    pointerTree.expandPath(filePath)
+                }
+                for (k in 0 until fileNode.childCount) {
+                    val hunkNode = fileNode.getChildAt(k) as? DefaultMutableTreeNode ?: continue
+                    val hunkPath = TreePath(hunkNode.path)
+                    pointerTree.expandPath(hunkPath)
+                    val hObj = hunkNode.userObject
+                    if (selectedUserObj is HunkNodeData && hObj is HunkNodeData &&
+                        hObj.fileDetail.summary.path == selectedUserObj.fileDetail.summary.path &&
+                        hObj.pointer.newStartLine == selectedUserObj.pointer.newStartLine
+                    ) {
+                        pathToSelect = hunkPath
+                    }
+                    for (m in 0 until hunkNode.childCount) {
+                        val noteNode = hunkNode.getChildAt(m) as? DefaultMutableTreeNode ?: continue
+                        val nObj = noteNode.userObject
+                        if (selectedUserObj is PointerMdNoteNodeData && nObj is PointerMdNoteNodeData &&
+                            nObj.fileDetail.summary.path == selectedUserObj.fileDetail.summary.path &&
+                            nObj.pointer.newStartLine == selectedUserObj.pointer.newStartLine
+                        ) {
+                            pathToSelect = TreePath(noteNode.path)
+                        }
+                    }
+                }
+            }
+        }
+        if (pathToSelect != null) {
+            pointerTree.selectionPath = pathToSelect
+        }
+    }
+
+    private fun populatePointerTreeNodes(detail: CommitDetail) {
+        pointerRoot.removeAllChildren()
         val grouped = detail.fileDetails.groupBy { it.summary.primaryLayer }
         for ((layer, files) in grouped.entries.sortedBy { it.key.flowOrder }) {
             val layerNode = DefaultMutableTreeNode(LayerGroupNodeData(layer, files.size))
@@ -1034,10 +1214,10 @@ class CodeTrackerPanel(
                 val fileNode = DefaultMutableTreeNode(FileNodeData(fd))
                 when {
                     fd.skippedLargeOrBinary -> {
-                        fileNode.add(DefaultMutableTreeNode(fd.skipReason ?: "Diff 파싱 생략"))
+                        fileNode.add(DefaultMutableTreeNode(fd.skipReason ?: CodeTrackerI18n.defaultSkipText()))
                     }
                     fd.onlyImportOrWhitespaceChanges -> {
-                        fileNode.add(DefaultMutableTreeNode("import/공백 정리만 포함됨"))
+                        fileNode.add(DefaultMutableTreeNode(CodeTrackerI18n.importWhitespaceOnlyText()))
                     }
                     else -> {
                         for (hunk in fd.hunks) {
@@ -1061,13 +1241,6 @@ class CodeTrackerPanel(
                 layerNode.add(fileNode)
             }
             pointerRoot.add(layerNode)
-        }
-
-        pointerModel.reload()
-        var row = 0
-        while (row < pointerTree.rowCount) {
-            pointerTree.expandRow(row)
-            row++
         }
     }
 
@@ -1095,7 +1268,11 @@ class CodeTrackerPanel(
             }
         }
         if (fileDetail == null) {
-            Messages.showInfoMessage(project, "Diff를 비교할 파일을 먼저 선택해 주세요.", "Maekom Code Tracker")
+            Messages.showInfoMessage(
+                project,
+                CodeTrackerI18n.tr("Diff를 비교할 파일을 먼저 선택해 주세요.", "Please select a file to compare Diff."),
+                "Maekom Code Tracker"
+            )
             return
         }
         openDiff(fileDetail, pointer)
@@ -1115,12 +1292,11 @@ class CodeTrackerPanel(
 
     fun triggerUpdateCheck(versionLabel: JBLabel? = null, triggerButton: JButton? = null) {
         triggerButton?.isEnabled = false
-        // Register Custom Plugin Repository host in IntelliJ UpdateSettings before querying
         PluginUpdateChecker.ensureCustomPluginRepoRegistered()
 
         ProgressManager.getInstance().run(object : Task.Backgroundable(
             project,
-            "Maekom Code Tracker: 최신 버전 확인 중",
+            CodeTrackerI18n.tr("Maekom Code Tracker: 최신 버전 확인 중", "Maekom Code Tracker: Checking for updates"),
             true
         ) {
             override fun run(indicator: ProgressIndicator) {
@@ -1134,17 +1310,10 @@ class CodeTrackerPanel(
 
                     when (result) {
                         is UpdateCheckResult.UpdateAvailable -> {
-                            val message = buildString {
-                                appendLine("새 버전의 Maekom Code Tracker가 출시되었습니다.")
-                                appendLine()
-                                appendLine("버전: v${result.currentVersion} → v${result.latestVersion}")
-                                appendLine()
-                                append("확인을 누르면 IntelliJ Settings > Plugins 창이 열립니다. 목록에서 [Update] 버튼을 눌러 바로 업데이트하세요.")
-                            }
                             Messages.showInfoMessage(
                                 project,
-                                message,
-                                "Maekom Code Tracker - 새 버전 안내"
+                                CodeTrackerI18n.updateAvailableMessage(result.currentVersion, result.latestVersion),
+                                CodeTrackerI18n.updateAvailableTitle()
                             )
                             ShowSettingsUtil.getInstance().showSettingsDialog(
                                 project,
@@ -1155,8 +1324,8 @@ class CodeTrackerPanel(
                         is UpdateCheckResult.UpToDate -> {
                             Messages.showInfoMessage(
                                 project,
-                                "현재 최신 버전(v${result.currentVersion})을 사용 중입니다.",
-                                "Maekom Code Tracker - 업데이트 확인"
+                                CodeTrackerI18n.updateUpToDateMessage(result.currentVersion),
+                                CodeTrackerI18n.updateUpToDateTitle()
                             )
                         }
 
@@ -1164,7 +1333,7 @@ class CodeTrackerPanel(
                             Messages.showInfoMessage(
                                 project,
                                 result.message,
-                                "Maekom Code Tracker - 업데이트 저장소 등록"
+                                CodeTrackerI18n.updateRepoRegisteredTitle()
                             )
                         }
 
@@ -1172,7 +1341,7 @@ class CodeTrackerPanel(
                             Messages.showWarningDialog(
                                 project,
                                 result.message,
-                                "Maekom Code Tracker - 업데이트 확인 실패"
+                                CodeTrackerI18n.updateFailedTitle()
                             )
                         }
                     }
@@ -1197,7 +1366,10 @@ class CodeTrackerPanel(
         if (markdown.isNullOrBlank()) {
             Messages.showInfoMessage(
                 project,
-                "복사할 커밋 또는 작업 에피소드를 먼저 선택해 주세요.",
+                CodeTrackerI18n.tr(
+                    "복사할 커밋 또는 작업 에피소드를 먼저 선택해 주세요.",
+                    "Please select a commit or work episode to copy."
+                ),
                 "Maekom Code Tracker"
             )
             return
@@ -1233,9 +1405,12 @@ class CodeTrackerPanel(
                     }
                     append("[$range] ", SimpleTextAttributes.REGULAR_BOLD_ATTRIBUTES)
                     append(ep.authorName, SimpleTextAttributes.REGULAR_ATTRIBUTES)
-                    append(" (${ep.commits.size}커밋)", SimpleTextAttributes.GRAYED_ATTRIBUTES)
+                    append(" (${CodeTrackerI18n.commitsCountUnit(ep.commits.size)})", SimpleTextAttributes.GRAYED_ATTRIBUTES)
                     if (ep.hasMarkdownDocs) {
-                        append("  [.md ${ep.markdownFiles.size}]", SimpleTextAttributes(SimpleTextAttributes.STYLE_BOLD, JBColor(Color(0x175CD3), Color(0x82B1FF))))
+                        append(
+                            "  [.md ${ep.markdownFiles.size}]",
+                            SimpleTextAttributes(SimpleTextAttributes.STYLE_BOLD, JBColor(Color(0x175CD3), Color(0x82B1FF)))
+                        )
                     }
                 }
 
@@ -1248,10 +1423,16 @@ class CodeTrackerPanel(
 
                     val layerBadges = c.primaryLayers.take(2).joinToString(" ") { it.badgeText }
                     if (layerBadges.isNotBlank()) {
-                        append("  $layerBadges", SimpleTextAttributes(SimpleTextAttributes.STYLE_PLAIN, JBColor(Color(0x0E7490), Color(0x67E8F9))))
+                        append(
+                            "  $layerBadges",
+                            SimpleTextAttributes(SimpleTextAttributes.STYLE_PLAIN, JBColor(Color(0x0E7490), Color(0x67E8F9)))
+                        )
                     }
                     if (c.hasMarkdownChanges || obj.episode.hasMarkdownDocs) {
-                        append("  📄.md", SimpleTextAttributes(SimpleTextAttributes.STYLE_PLAIN, JBColor(Color(0x7E22CE), Color(0xC084FC))))
+                        append(
+                            "  📄.md",
+                            SimpleTextAttributes(SimpleTextAttributes.STYLE_PLAIN, JBColor(Color(0x7E22CE), Color(0xC084FC)))
+                        )
                     }
                 }
 
@@ -1277,7 +1458,7 @@ class CodeTrackerPanel(
                 is LayerGroupNodeData -> {
                     icon = AllIcons.Nodes.Module
                     append(obj.layer.badgeText, SimpleTextAttributes.REGULAR_BOLD_ATTRIBUTES)
-                    append(" (${obj.fileCount}파일)", SimpleTextAttributes.GRAYED_ATTRIBUTES)
+                    append(" (${CodeTrackerI18n.filesCountUnit(obj.fileCount)})", SimpleTextAttributes.GRAYED_ATTRIBUTES)
                 }
 
                 is FileNodeData -> {
@@ -1299,7 +1480,10 @@ class CodeTrackerPanel(
                 is HunkNodeData -> {
                     val p = obj.pointer
                     icon = AllIcons.Nodes.Method
-                    append("📍 Line ${p.newStartLine} : ", SimpleTextAttributes(SimpleTextAttributes.STYLE_BOLD, JBColor(Color(0x1D5FD6), Color(0x6B9BFA))))
+                    append(
+                        "📍 Line ${p.newStartLine} : ",
+                        SimpleTextAttributes(SimpleTextAttributes.STYLE_BOLD, JBColor(Color(0x1D5FD6), Color(0x6B9BFA)))
+                    )
                     append(p.displayContext, SimpleTextAttributes.REGULAR_ATTRIBUTES)
                     append("  (+${p.addedLines}/-${p.deletedLines})", SimpleTextAttributes.GRAYED_ATTRIBUTES)
                 }

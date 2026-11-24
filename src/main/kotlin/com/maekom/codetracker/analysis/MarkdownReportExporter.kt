@@ -1,11 +1,12 @@
 package com.maekom.codetracker.analysis
 
+import com.maekom.codetracker.i18n.CodeTrackerI18n
 import com.maekom.codetracker.model.CommitDetail
 import com.maekom.codetracker.model.WorkEpisode
 import java.time.format.DateTimeFormatter
 
 /**
- * Generates clean Markdown reports for the [마크다운 복사] clipboard action.
+ * Generates clean Markdown reports for the clipboard export action in current language (KO/EN).
  */
 object MarkdownReportExporter {
 
@@ -13,23 +14,35 @@ object MarkdownReportExporter {
 
     fun exportCommitDetail(detail: CommitDetail): String = buildString {
         val c = detail.summary
+        val flowSummary = RationaleAndCheckEngine.buildCrossLayerFlowSummary(
+            detail.summary,
+            detail.fileDetails,
+            detail.allStackTags
+        )
+
         appendLine("## [${c.shortHash}] ${c.subject}")
-        appendLine("- **작성자**: ${c.authorName} (${c.authorEmail})")
-        appendLine("- **일시**: ${c.timestamp.format(DT_FMT)}")
+        appendLine("- **${CodeTrackerI18n.tr("작성자", "Author")}**: ${c.authorName} (${c.authorEmail})")
+        appendLine("- **${CodeTrackerI18n.tr("일시", "Time")}**: ${c.timestamp.format(DT_FMT)}")
         if (detail.issueTags.isNotEmpty()) {
-            appendLine("- **이슈 태그**: ${detail.issueTags.joinToString(" ")}")
+            appendLine("- **${CodeTrackerI18n.tr("이슈 태그", "Issue Tags")}**: ${detail.issueTags.joinToString(" ")}")
         }
-        appendLine("- **${detail.crossLayerFlowSummary}**")
+        appendLine("- **$flowSummary**")
         if (detail.allStackTags.isNotEmpty()) {
-            appendLine("- **연관 데이터 저장소/스택**: ${detail.allStackTags.joinToString(", ") { it.label }}")
+            appendLine(
+                "- **${CodeTrackerI18n.tr("연관 데이터 저장소/스택", "Related Data Stores / Stacks")}**: " +
+                    detail.allStackTags.joinToString(", ") { it.label }
+            )
         }
         if (detail.checkBadges.isNotEmpty()) {
-            appendLine("- **체킹 포인트**: ${detail.checkBadges.joinToString(" ") { "`${it.label}`" }}")
+            appendLine(
+                "- **${CodeTrackerI18n.tr("체킹 포인트", "Check Points")}**: " +
+                    detail.checkBadges.joinToString(" ") { "`${it.localizedLabel()}`" }
+            )
         }
         appendLine()
 
         if (c.body.isNotBlank() && c.body.trim() != c.subject.trim()) {
-            appendLine("### 커밋 메시지 본문")
+            appendLine("### ${CodeTrackerI18n.tr("커밋 메시지 본문", "Commit Message Body")}")
             appendLine("```text")
             appendLine(c.body.trim())
             appendLine("```")
@@ -37,7 +50,7 @@ object MarkdownReportExporter {
         }
 
         if (detail.matchedMarkdownSections.isNotEmpty()) {
-            appendLine("### 연관 문서(.md) 맥락")
+            appendLine("### ${CodeTrackerI18n.tr("연관 문서(.md) 맥락", "Related Markdown (.md) Context")}")
             for (sec in detail.matchedMarkdownSections) {
                 appendLine("- **${sec.filePath}** (`${sec.heading}`)")
                 sec.checkedItems.forEach { appendLine("  - [x] $it") }
@@ -47,7 +60,7 @@ object MarkdownReportExporter {
         }
 
         if (detail.apiHints.isNotEmpty()) {
-            appendLine("### 추출된 내부/외부 API 경로")
+            appendLine("### ${CodeTrackerI18n.tr("추출된 내부/외부 API 경로", "Extracted Internal / External API Paths")}")
             for (api in detail.apiHints) {
                 appendLine("- [${api.kind}] `${api.methodOrAnnotation}` `${api.pathOrUri}` (${api.sourceFile}:${api.lineNumber})")
             }
@@ -55,26 +68,26 @@ object MarkdownReportExporter {
         }
 
         if (detail.addedComments.isNotEmpty()) {
-            appendLine("### 새로 추가된 주석")
+            appendLine("### ${CodeTrackerI18n.tr("새로 추가된 주석", "Newly Added Comments")}")
             for ((file, comment) in detail.addedComments.take(10)) {
                 appendLine("- `$file`: $comment")
             }
             appendLine()
         }
 
-        appendLine("### 수정 위치 포인터")
+        appendLine("### ${CodeTrackerI18n.tr("수정 위치 포인터", "Smart Code Pointers")}")
         val groupedByLayer = detail.fileDetails.groupBy { it.summary.primaryLayer }
         for ((layer, files) in groupedByLayer.entries.sortedBy { it.key.flowOrder }) {
             appendLine("#### ${layer.badgeText}")
             for (fd in files) {
                 val tagsStr = if (fd.stackTags.isNotEmpty()) " ${fd.stackTags.joinToString(" ") { it.label }}" else ""
-                appendLine("- `${fd.summary.path}` (${fd.summary.status.label}, +${fd.addedLinesTotal}/-${fd.deletedLinesTotal})$tagsStr")
+                appendLine("- `${fd.summary.path}` (${fd.summary.status.localizedLabel()}, +${fd.addedLinesTotal}/-${fd.deletedLinesTotal})$tagsStr")
                 when {
                     fd.skippedLargeOrBinary -> {
-                        appendLine("  - _${fd.skipReason}_")
+                        appendLine("  - _${fd.skipReason ?: CodeTrackerI18n.defaultSkipText()}_")
                     }
                     fd.onlyImportOrWhitespaceChanges -> {
-                        appendLine("  - _import/공백 정리만 포함됨_")
+                        appendLine("  - _${CodeTrackerI18n.importWhitespaceOnlyText()}_")
                     }
                     else -> {
                         for (h in fd.hunks) {
@@ -91,11 +104,11 @@ object MarkdownReportExporter {
     }
 
     fun exportEpisodeSummary(episode: WorkEpisode, cachedDetails: Map<String, CommitDetail>): String = buildString {
-        appendLine("## 작업 에피소드 요약 (${episode.date} | ${episode.authorName})")
-        appendLine("- **작업 시간**: ${episode.startTime.format(DT_FMT)} ~ ${episode.endTime.format(DT_FMT)}")
-        appendLine("- **커밋 수**: ${episode.commits.size}건")
+        appendLine("## ${CodeTrackerI18n.tr("작업 에피소드 요약", "Work Episode Summary")} (${episode.date} | ${episode.authorName})")
+        appendLine("- **${CodeTrackerI18n.tr("작업 시간", "Time Range")}**: ${episode.startTime.format(DT_FMT)} ~ ${episode.endTime.format(DT_FMT)}")
+        appendLine("- **${CodeTrackerI18n.tr("커밋 수", "Commits")}**: ${CodeTrackerI18n.itemsCountUnit(episode.commits.size)}")
         if (episode.markdownFiles.isNotEmpty()) {
-            appendLine("- **연관 문서(.md)**: ${episode.markdownFiles.map { it.filePath }.distinct().joinToString(", ")}")
+            appendLine("- **${CodeTrackerI18n.tr("연관 문서(.md)", "Related Docs (.md)")}**: ${episode.markdownFiles.map { it.filePath }.distinct().joinToString(", ")}")
         }
         appendLine()
 
@@ -107,9 +120,9 @@ object MarkdownReportExporter {
             } else {
                 val layers = c.primaryLayers.joinToString(" ") { it.badgeText }
                 appendLine("### [${c.shortHash}] ${c.subject} (${c.timestamp.format(DT_FMT)})")
-                appendLine("- 레이어: $layers")
+                appendLine("- ${CodeTrackerI18n.tr("레이어", "Layers")}: $layers")
                 for (f in c.files) {
-                    appendLine("  - `${f.path}` (${f.status.label}, ${f.primaryLayer.badgeText})")
+                    appendLine("  - `${f.path}` (${f.status.localizedLabel()}, ${f.primaryLayer.badgeText})")
                 }
                 appendLine()
             }

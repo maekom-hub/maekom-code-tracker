@@ -18,6 +18,7 @@ import com.intellij.openapi.util.Pair as IntelliJPair
 import com.intellij.openapi.vfs.LocalFileSystem
 import com.intellij.openapi.vfs.VirtualFile
 import com.maekom.codetracker.git.GitRepositoryService
+import com.maekom.codetracker.i18n.CodeTrackerI18n
 import com.maekom.codetracker.model.CodeHunkPointer
 import com.maekom.codetracker.model.CommitSummary
 import com.maekom.codetracker.model.FileChangeStatus
@@ -48,10 +49,13 @@ object CodeNavigator {
         if (file.status == FileChangeStatus.DELETED || virtualFile == null || !virtualFile.exists() || virtualFile.isDirectory) {
             val choice = Messages.showYesNoDialog(
                 project,
-                "파일 '${file.path}'은(는) 삭제되었거나 현재 체크아웃된 워크스페이스에 존재하지 않습니다.\n해당 커밋의 Before / After Diff 창으로 확인하시겠습니까?",
-                "Maekom Code Tracker - 파일 없음",
-                "Diff 보기",
-                "닫기",
+                CodeTrackerI18n.tr(
+                    "파일 '${file.path}'은(는) 삭제되었거나 현재 체크아웃된 워크스페이스에 존재하지 않습니다.\n해당 커밋의 Before / After Diff 창으로 확인하시겠습니까?",
+                    "File '${file.path}' was deleted or does not exist in the current workspace.\nWould you like to view its Before / After Diff for this commit?"
+                ),
+                CodeTrackerI18n.tr("Maekom Code Tracker - 파일 없음", "Maekom Code Tracker - File Not Found"),
+                CodeTrackerI18n.tr("Diff 보기", "View Diff"),
+                CodeTrackerI18n.closeButton(),
                 Messages.getInformationIcon()
             )
             if (choice == Messages.YES) {
@@ -195,12 +199,12 @@ object CodeNavigator {
                     val afterContent = factory.create(project, afterText, fileType)
 
                     val beforeLabel = when {
-                        file.status == FileChangeStatus.ADDED -> "Before (신규 파일)"
-                        commit.isInitialCommit -> "Before (최초 커밋)"
+                        file.status == FileChangeStatus.ADDED -> CodeTrackerI18n.tr("Before (신규 파일)", "Before (New File)")
+                        commit.isInitialCommit -> CodeTrackerI18n.tr("Before (최초 커밋)", "Before (Initial Commit)")
                         else -> "Before (${commit.shortHash}^1 : ${file.oldPath ?: file.path})"
                     }
                     val afterLabel = when (file.status) {
-                        FileChangeStatus.DELETED -> "After (삭제됨)"
+                        FileChangeStatus.DELETED -> CodeTrackerI18n.tr("After (삭제됨)", "After (Deleted)")
                         else -> "After (${commit.shortHash} : ${file.path})"
                     }
                     val title = "[${commit.shortHash}] ${file.path}"

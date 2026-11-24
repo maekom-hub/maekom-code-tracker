@@ -2,6 +2,7 @@ package com.maekom.codetracker.analysis
 
 import com.intellij.openapi.project.Project
 import com.maekom.codetracker.git.GitRepositoryService
+import com.maekom.codetracker.i18n.CodeTrackerI18n
 import com.maekom.codetracker.model.CheckBadge
 import com.maekom.codetracker.model.CommitDetail
 import com.maekom.codetracker.model.CommitSummary
@@ -192,7 +193,7 @@ object RationaleAndCheckEngine {
         return badges.toList()
     }
 
-    private fun buildCrossLayerFlowSummary(
+    fun buildCrossLayerFlowSummary(
         commit: CommitSummary,
         fileDetails: List<FileDiffDetail>,
         allStackTags: Set<StackTag>
@@ -204,7 +205,7 @@ object RationaleAndCheckEngine {
             .sortedBy { it.flowOrder }
 
         if (orderedLayers.isEmpty()) {
-            return "흐름 요약: 변경 파일 없음"
+            return CodeTrackerI18n.tr("흐름 요약: 변경 파일 없음", "Flow Summary: No changed files")
         }
 
         // Highlight architectural layers cleanly; append related stack tags
@@ -214,9 +215,15 @@ object RationaleAndCheckEngine {
 
         return if (allStackTags.isNotEmpty()) {
             val tagPart = allStackTags.joinToString(", ") { it.label }
-            "흐름 요약: $layerChain → [$tagPart] 연동 수정"
+            CodeTrackerI18n.tr(
+                "흐름 요약: $layerChain → [$tagPart] 연동 수정",
+                "Flow Summary: $layerChain → [$tagPart] integration updated"
+            )
         } else {
-            "흐름 요약: $layerChain 수정"
+            CodeTrackerI18n.tr(
+                "흐름 요약: $layerChain 수정",
+                "Flow Summary: $layerChain updated"
+            )
         }
     }
 }

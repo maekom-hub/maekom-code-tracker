@@ -19,6 +19,7 @@ import com.intellij.util.ui.AsyncProcessIcon
 import com.intellij.util.ui.JBUI
 import com.maekom.codetracker.analysis.RationaleAndCheckEngine
 import com.maekom.codetracker.git.GitRepositoryService
+import com.maekom.codetracker.i18n.CodeTrackerI18n
 import com.maekom.codetracker.model.CodeHunkPointer
 import com.maekom.codetracker.model.CommitDetail
 import com.maekom.codetracker.model.FileDiffDetail
@@ -56,7 +57,8 @@ import javax.swing.tree.TreeSelectionModel
 
 /**
  * Modeless DialogWrapper displaying version/tag-grouped file modification history
- * with IntelliJ native loading spinners, on-demand commit rationale, and smart location pointers.
+ * with IntelliJ native loading spinners, on-demand commit rationale, smart pointers,
+ * and zero-restart live KO/EN localization sync.
  */
 class FileHistoryDialog(
     private val project: Project,
@@ -77,13 +79,27 @@ class FileHistoryDialog(
     private data class HistoryCommitNodeData(val entry: FileHistoryCommitEntry)
     private data class PointerHunkNodeData(val fileDetail: FileDiffDetail, val pointer: CodeHunkPointer)
 
-    private val headerCountLabel = JBLabel("이력 조회 중...").apply {
+    private val scopeLabel = JBLabel(
+        CodeTrackerI18n.fileHistoryScope(branch, startDate.format(DATE_FMT), endDate.format(DATE_FMT))
+    ).apply {
+        foreground = JBColor.GRAY
+        font = JBUI.Fonts.smallFont()
+    }
+    private val headerCountLabel = JBLabel(CodeTrackerI18n.fileHistoryLoadingCount()).apply {
         foreground = JBColor.GRAY
     }
     private val headerSpinner = AsyncProcessIcon("FileHistoryHeaderSpinner").apply {
         suspend()
         isVisible = false
     }
+
+    private val leftHeaderLabel = JBLabel(CodeTrackerI18n.fileHistoryLeftTitle()).apply {
+        border = JBUI.Borders.empty(4, 4, 4, 4)
+    }
+    private val rightTopHeaderLabel = JBLabel(CodeTrackerI18n.rationalePanelTitle()).apply {
+        border = JBUI.Borders.empty(4, 4, 4, 4)
+    }
+    private val rightBottomHeaderLabel = JBLabel(CodeTrackerI18n.pointerPanelTitle())
 
     // Left: Version/Tag nested history tree wrapped in JBLoadingPanel
     private val historyRoot = DefaultMutableTreeNode("History")
@@ -98,7 +114,7 @@ class FileHistoryDialog(
         editorKit = HTMLEditorKit()
         putClientProperty(JEditorPane.HONOR_DISPLAY_PROPERTIES, true)
         putClientProperty(JEditorPane.W3C_LENGTH_UNITS, true)
-        text = RationaleHtmlRenderer.renderPlaceholder("하위 커밋을 선택하면 해당 시점의 수정 사유와 스마트 위치 포인터가 표시됩니다.")
+        text = RationaleHtmlRenderer.renderPlaceholder(CodeTrackerI18n.fileHistorySelectCommitHint())
     }
 
     // Right Bottom: Commit-specific smart location pointer tree wrapped in JBLoadingPanel
@@ -110,7 +126,7 @@ class FileHistoryDialog(
     private val openDiffButton = JButton(AllIcons.Actions.Diff).apply {
         val size = JBUI.size(28, 28)
         text = ""
-        toolTipText = "이 변경 위치 Diff 비교"
+        toolTipText = CodeTrackerI18n.menuPointerDiff()
         margin = JBUI.emptyInsets()
         preferredSize = size
         minimumSize = size
@@ -118,6 +134,8 @@ class FileHistoryDialog(
         isFocusable = false
     }
 
+    private var loadedResult: FileHistoryResult? = null
+    private var loadFailed: Boolean = false
     private var selectedEntry: FileHistoryCommitEntry? = null
     private var selectedDetail: CommitDetail? = null
     private val detailCache = ConcurrentHashMap<String, CommitDetail>()
@@ -125,9 +143,10 @@ class FileHistoryDialog(
 
     init {
         isModal = false
-        title = "파일 수정 이력 - ${targetFilePath.substringAfterLast('/')}"
-        setCancelButtonText("닫기")
+        title = CodeTrackerI18n.fileHistoryDialogTitle(targetFilePath.substringAfterLast('/'))
+        setCancelButtonText(CodeTrackerI18n.closeButton())
         Disposer.register(disposable, headerSpinner)
+        CodeTrackerI18n.addListener(disposable) { applyLocalization() }
         init()
         loadHistoryAsync()
     }
@@ -157,12 +176,6 @@ class FileHistoryDialog(
             val fileLabel = JBLabel(targetFilePath, AllIcons.FileTypes.Any_type, JBLabel.LEFT).apply {
                 font = font.deriveFont(Font.BOLD)
             }
-            val scopeLabel = JBLabel(
-                "브랜치: $branch  |  기간: ${startDate.format(DATE_FMT)} ~ ${endDate.format(DATE_FMT)}"
-            ).apply {
-                foreground = JBColor.GRAY
-                font = JBUI.Fonts.smallFont()
-            }
             val leftMeta = JPanel(BorderLayout(0, 2)).apply {
                 isOpaque = false
                 add(fileLabel, BorderLayout.NORTH)
@@ -182,20 +195,14 @@ class FileHistoryDialog(
         leftLoadingPanel.add(JBScrollPane(historyTree), BorderLayout.CENTER)
         val leftPanel = JPanel(BorderLayout()).apply {
             border = JBUI.Borders.customLine(JBColor.border(), 1)
-            val header = JBLabel("  버전(태그)별 파일 수정 이력").apply {
-                border = JBUI.Borders.empty(4, 4, 4, 4)
-            }
-            add(header, BorderLayout.NORTH)
+            add(leftHeaderLabel, BorderLayout.NORTH)
             add(leftLoadingPanel, BorderLayout.CENTER)
         }
 
         // Right Top: Rationale
         val rightTopPanel = JPanel(BorderLayout()).apply {
             border = JBUI.Borders.customLine(JBColor.border(), 1)
-            val header = JBLabel("  수정 사유 & 아키텍처 체킹 패널").apply {
-                border = JBUI.Borders.empty(4, 4, 4, 4)
-            }
-            add(header, BorderLayout.NORTH)
+            add(rightTopHeaderLabel, BorderLayout.NORTH)
             add(JBScrollPane(rationalePane), BorderLayout.CENTER)
         }
 
@@ -205,7 +212,7 @@ class FileHistoryDialog(
             border = JBUI.Borders.customLine(JBColor.border(), 1)
             val headerBar = JPanel(BorderLayout()).apply {
                 border = JBUI.Borders.empty(2, 6, 2, 4)
-                add(JBLabel("스마트 위치 포인터 (클릭: 코드 이동 / 우클릭: Diff 비교)"), BorderLayout.WEST)
+                add(rightBottomHeaderLabel, BorderLayout.WEST)
                 add(openDiffButton, BorderLayout.EAST)
             }
             add(headerBar, BorderLayout.NORTH)
@@ -223,6 +230,75 @@ class FileHistoryDialog(
         }
         rootPanel.add(mainSplitter, BorderLayout.CENTER)
         return rootPanel
+    }
+
+    private fun applyLocalization() {
+        if (project.isDisposed || isDisposed) return
+
+        title = CodeTrackerI18n.fileHistoryDialogTitle(targetFilePath.substringAfterLast('/'))
+        val closeText = CodeTrackerI18n.closeButton()
+        setCancelButtonText(closeText)
+        cancelAction.putValue(Action.NAME, closeText)
+
+        scopeLabel.text = CodeTrackerI18n.fileHistoryScope(branch, startDate.format(DATE_FMT), endDate.format(DATE_FMT))
+        leftHeaderLabel.text = CodeTrackerI18n.fileHistoryLeftTitle()
+        rightTopHeaderLabel.text = CodeTrackerI18n.rationalePanelTitle()
+        rightBottomHeaderLabel.text = CodeTrackerI18n.pointerPanelTitle()
+        openDiffButton.toolTipText = CodeTrackerI18n.menuPointerDiff()
+        pointerTree.emptyText.text = CodeTrackerI18n.fileHistorySelectCommitHint()
+
+        if (::leftLoadingPanel.isInitialized) {
+            leftLoadingPanel.setLoadingText(CodeTrackerI18n.fileHistoryLoadingLeftText())
+        }
+        if (::rightLoadingPanel.isInitialized) {
+            rightLoadingPanel.setLoadingText(CodeTrackerI18n.fileHistoryLoadingRightText())
+        }
+
+        val res = loadedResult
+        when {
+            loadFailed -> {
+                headerCountLabel.text = CodeTrackerI18n.fileHistoryFailedCount()
+            }
+            res == null -> {
+                headerCountLabel.text = CodeTrackerI18n.fileHistoryLoadingCount()
+            }
+            else -> {
+                headerCountLabel.text = CodeTrackerI18n.fileHistoryTotalCount(
+                    res.totalCommits,
+                    res.groups.size,
+                    res.hasTagsInRepo
+                )
+                if (res.totalCommits == 0) {
+                    historyTree.emptyText.text = CodeTrackerI18n.fileHistoryEmptyText()
+                }
+            }
+        }
+
+        // Repaint left history tree while preserving expansion & selection
+        historyTree.revalidate()
+        historyTree.repaint()
+
+        // Re-render right rationale & pointer tree preserving selection
+        val detail = selectedDetail
+        if (detail != null) {
+            val prevSelectedHunkLine = ((pointerTree.lastSelectedPathComponent as? DefaultMutableTreeNode)
+                ?.userObject as? PointerHunkNodeData)?.pointer?.newStartLine
+            displayEntryDetail(detail)
+            if (prevSelectedHunkLine != null) {
+                for (i in 0 until pointerRoot.childCount) {
+                    val child = pointerRoot.getChildAt(i) as? DefaultMutableTreeNode ?: continue
+                    val hunkObj = child.userObject as? PointerHunkNodeData ?: continue
+                    if (hunkObj.pointer.newStartLine == prevSelectedHunkLine) {
+                        pointerTree.selectionPath = TreePath(child.path)
+                        break
+                    }
+                }
+            }
+        } else if (res != null && res.totalCommits == 0) {
+            rationalePane.text = RationaleHtmlRenderer.renderPlaceholder(CodeTrackerI18n.fileHistoryEmptyText())
+        } else {
+            rationalePane.text = RationaleHtmlRenderer.renderPlaceholder(CodeTrackerI18n.fileHistorySelectCommitHint())
+        }
     }
 
     private fun setHeaderSpinnerActive(active: Boolean) {
@@ -247,7 +323,7 @@ class FileHistoryDialog(
         pointerTree.toggleClickCount = 0
         pointerTree.selectionModel.selectionMode = TreeSelectionModel.SINGLE_TREE_SELECTION
         pointerTree.cellRenderer = HistoryPointerTreeCellRenderer()
-        pointerTree.emptyText.text = "하위 커밋을 선택하면 이 파일의 변경 위치 포인터가 표시됩니다."
+        pointerTree.emptyText.text = CodeTrackerI18n.fileHistorySelectCommitHint()
     }
 
     private fun wireListeners() {
@@ -260,14 +336,13 @@ class FileHistoryDialog(
                 }
 
                 is VersionGroupNodeData -> {
-                    // Cancel any in-flight detail request and show clean guidance placeholder
                     detailRequestSeq.incrementAndGet()
                     selectedEntry = null
                     selectedDetail = null
                     rightLoadingPanel.stopLoading()
                     setHeaderSpinnerActive(false)
                     rationalePane.text = RationaleHtmlRenderer.renderPlaceholder(
-                        "하위 커밋을 선택하면 해당 시점의 수정 사유와 스마트 위치 포인터가 표시됩니다."
+                        CodeTrackerI18n.fileHistorySelectCommitHint()
                     )
                     rationalePane.caretPosition = 0
                     pointerRoot.removeAllChildren()
@@ -276,7 +351,7 @@ class FileHistoryDialog(
             }
         }
 
-        // Right-click on left history tree commit node -> Diff 비교
+        // Right-click on left history tree commit node -> Diff compare
         historyTree.addMouseListener(object : MouseAdapter() {
             override fun mousePressed(e: MouseEvent) = maybeShowHistoryPopup(e)
             override fun mouseReleased(e: MouseEvent) = maybeShowHistoryPopup(e)
@@ -290,7 +365,7 @@ class FileHistoryDialog(
                 val entry = commitNode.entry
 
                 val popup = JPopupMenu()
-                popup.add(JMenuItem("이 커밋의 파일 Diff 비교").apply {
+                popup.add(JMenuItem(CodeTrackerI18n.menuCommitFileDiff()).apply {
                     addActionListener {
                         val cachedPointer = detailCache[entry.commit.hash]
                             ?.fileDetails?.firstOrNull()?.hunks?.firstOrNull()
@@ -324,10 +399,10 @@ class FileHistoryDialog(
                 val entry = selectedEntry ?: return
 
                 val popup = JPopupMenu()
-                popup.add(JMenuItem("이 변경 위치 Diff 비교").apply {
+                popup.add(JMenuItem(CodeTrackerI18n.menuPointerDiff()).apply {
                     addActionListener { openEntryDiff(entry, obj.pointer) }
                 })
-                popup.add(JMenuItem("워크스페이스 코드 위치로 이동").apply {
+                popup.add(JMenuItem(CodeTrackerI18n.menuJumpToCode()).apply {
                     addActionListener { navigateToWorkspacePointer(obj.pointer) }
                 })
                 popup.show(pointerTree, e.x, e.y)
@@ -347,7 +422,11 @@ class FileHistoryDialog(
         openDiffButton.addActionListener {
             val entry = selectedEntry
             if (entry == null) {
-                Messages.showInfoMessage(project, "Diff를 비교할 커밋을 먼저 선택해 주세요.", "Maekom Code Tracker")
+                Messages.showInfoMessage(
+                    project,
+                    CodeTrackerI18n.tr("Diff를 비교할 커밋을 먼저 선택해 주세요.", "Please select a commit to compare Diff."),
+                    "Maekom Code Tracker"
+                )
                 return@addActionListener
             }
             val node = pointerTree.lastSelectedPathComponent as? DefaultMutableTreeNode
@@ -358,7 +437,7 @@ class FileHistoryDialog(
     }
 
     private fun loadHistoryAsync() {
-        leftLoadingPanel.setLoadingText("버전별 파일 변경 이력 및 태그 구간 분석 중...")
+        leftLoadingPanel.setLoadingText(CodeTrackerI18n.fileHistoryLoadingLeftText())
         leftLoadingPanel.startLoading()
         setHeaderSpinnerActive(true)
 
@@ -383,12 +462,20 @@ class FileHistoryDialog(
                 if (project.isDisposed || isDisposed) return@invokeLater
                 try {
                     if (error != null) {
-                        headerCountLabel.text = "조회 실패"
-                        historyTree.emptyText.text = "파일 수정 이력을 불러오지 못했습니다."
+                        loadFailed = true
+                        headerCountLabel.text = CodeTrackerI18n.fileHistoryFailedCount()
+                        historyTree.emptyText.text = CodeTrackerI18n.tr(
+                            "파일 수정 이력을 불러오지 못했습니다.",
+                            "Failed to load file modification history."
+                        )
                         rationalePane.text = RationaleHtmlRenderer.renderPlaceholder(
-                            "파일 수정 이력 조회 중 오류가 발생했습니다: ${error.message}"
+                            CodeTrackerI18n.tr(
+                                "파일 수정 이력 조회 중 오류가 발생했습니다: ${error.message}",
+                                "Error loading file history: ${error.message}"
+                            )
                         )
                     } else if (result != null) {
+                        loadedResult = result
                         applyHistoryResult(result)
                     }
                 } finally {
@@ -421,18 +508,15 @@ class FileHistoryDialog(
 
         historyModel.reload()
 
-        val groupTypeDesc = if (result.hasTagsInRepo) {
-            "버전/태그 그룹 ${result.groups.size}개"
-        } else {
-            "에피소드 그룹 ${result.groups.size}개"
-        }
-        headerCountLabel.text = "총 ${result.totalCommits}건 수정 ($groupTypeDesc)"
+        headerCountLabel.text = CodeTrackerI18n.fileHistoryTotalCount(
+            result.totalCommits,
+            result.groups.size,
+            result.hasTagsInRepo
+        )
 
         if (result.totalCommits == 0) {
-            historyTree.emptyText.text = "선택한 기간 및 조건 내 파일 수정 이력이 없습니다."
-            rationalePane.text = RationaleHtmlRenderer.renderPlaceholder(
-                "선택한 기간 및 조건 내 파일 수정 이력이 없습니다."
-            )
+            historyTree.emptyText.text = CodeTrackerI18n.fileHistoryEmptyText()
+            rationalePane.text = RationaleHtmlRenderer.renderPlaceholder(CodeTrackerI18n.fileHistoryEmptyText())
             return
         }
 
@@ -463,7 +547,7 @@ class FileHistoryDialog(
         pointerRoot.removeAllChildren()
         pointerModel.reload()
 
-        rightLoadingPanel.setLoadingText("스마트 위치 포인터 및 변경 라인 분석 중...")
+        rightLoadingPanel.setLoadingText(CodeTrackerI18n.fileHistoryLoadingRightText())
         rightLoadingPanel.startLoading()
         setHeaderSpinnerActive(true)
 
@@ -483,13 +567,15 @@ class FileHistoryDialog(
 
             ApplicationManager.getApplication().invokeLater {
                 if (project.isDisposed || isDisposed) return@invokeLater
-                // Ignore stale responses when user rapidly navigates with arrow keys or mouse
                 if (detailRequestSeq.get() != requestId) return@invokeLater
 
                 try {
                     if (error != null) {
                         rationalePane.text = RationaleHtmlRenderer.renderPlaceholder(
-                            "단일 파일 Diff 분석 중 오류가 발생했습니다: ${error.message}"
+                            CodeTrackerI18n.tr(
+                                "단일 파일 Diff 분석 중 오류가 발생했습니다: ${error.message}",
+                                "Error analyzing single-file Diff: ${error.message}"
+                            )
                         )
                     } else if (detail != null) {
                         displayEntryDetail(detail)
@@ -513,13 +599,13 @@ class FileHistoryDialog(
         for (fd in detail.fileDetails) {
             when {
                 fd.skippedLargeOrBinary -> {
-                    pointerRoot.add(DefaultMutableTreeNode(fd.skipReason ?: "Diff 파싱 생략"))
+                    pointerRoot.add(DefaultMutableTreeNode(fd.skipReason ?: CodeTrackerI18n.defaultSkipText()))
                 }
                 fd.onlyImportOrWhitespaceChanges -> {
-                    pointerRoot.add(DefaultMutableTreeNode("import/공백 정리만 포함됨"))
+                    pointerRoot.add(DefaultMutableTreeNode(CodeTrackerI18n.importWhitespaceOnlyText()))
                 }
                 fd.hunks.isEmpty() -> {
-                    pointerRoot.add(DefaultMutableTreeNode("텍스트 변경 블록 없음 (${fd.summary.status.label})"))
+                    pointerRoot.add(DefaultMutableTreeNode(CodeTrackerI18n.fileHistoryNoTextHunks(fd.summary.status.localizedLabel())))
                 }
                 else -> {
                     for (hunk in fd.hunks) {
@@ -535,7 +621,6 @@ class FileHistoryDialog(
         val entry = selectedEntry ?: return
         val fs = LocalFileSystem.getInstance()
 
-        // Prefer current workspace file path (handles historical renames gracefully)
         val currentTargetNio = Path.of(repoRootPath, targetFilePath).normalize()
         val currentVf = fs.refreshAndFindFileByNioFile(currentTargetNio)
         if (currentVf != null && currentVf.exists() && !currentVf.isDirectory) {
@@ -550,7 +635,6 @@ class FileHistoryDialog(
             return
         }
 
-        // Secondary check: historical pathAtCommit if different and present
         if (entry.pathAtCommit != targetFilePath) {
             val histNio = Path.of(repoRootPath, entry.pathAtCommit).normalize()
             val histVf = fs.refreshAndFindFileByNioFile(histNio)
@@ -566,13 +650,15 @@ class FileHistoryDialog(
             }
         }
 
-        // Neither path exists in current checkout -> offer standard Diff viewer at commit point
         val choice = Messages.showYesNoDialog(
             project,
-            "파일 '${entry.pathAtCommit}' (현재 경로: '$targetFilePath')을(를) 현재 워크스페이스에서 찾을 수 없습니다.\n해당 커밋 시점의 Before / After Diff 창으로 확인하시겠습니까?",
-            "Maekom Code Tracker - 파일 없음",
-            "Diff 보기",
-            "닫기",
+            CodeTrackerI18n.tr(
+                "파일 '${entry.pathAtCommit}' (현재 경로: '$targetFilePath')을(를) 현재 워크스페이스에서 찾을 수 없습니다.\n해당 커밋 시점의 Before / After Diff 창으로 확인하시겠습니까?",
+                "File '${entry.pathAtCommit}' (current path: '$targetFilePath') was not found in the current workspace.\nWould you like to view its Before / After Diff for this commit?"
+            ),
+            CodeTrackerI18n.tr("Maekom Code Tracker - 파일 없음", "Maekom Code Tracker - File Not Found"),
+            CodeTrackerI18n.tr("Diff 보기", "View Diff"),
+            CodeTrackerI18n.closeButton(),
             Messages.getInformationIcon()
         )
         if (choice == Messages.YES) {
@@ -606,7 +692,7 @@ class FileHistoryDialog(
                     icon = null
                     val prefix = if (obj.group.isTagGroup) "🏷️ " else "📅 "
                     append("$prefix${obj.group.groupLabel}", SimpleTextAttributes.REGULAR_BOLD_ATTRIBUTES)
-                    append(" (${obj.group.entries.size}건)", SimpleTextAttributes.GRAYED_ATTRIBUTES)
+                    append(" (${CodeTrackerI18n.itemsCountUnit(obj.group.entries.size)})", SimpleTextAttributes.GRAYED_ATTRIBUTES)
                 }
 
                 is HistoryCommitNodeData -> {

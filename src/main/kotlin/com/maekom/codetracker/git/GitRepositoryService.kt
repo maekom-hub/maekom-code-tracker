@@ -2,7 +2,6 @@ package com.maekom.codetracker.git
 
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.vcs.ProjectLevelVcsManager
-import com.maekom.codetracker.analysis.EpisodeGrouper
 import com.maekom.codetracker.analysis.LayerClassifier
 import com.maekom.codetracker.model.AnalysisFilter
 import com.maekom.codetracker.model.CommitSummary
@@ -63,14 +62,22 @@ object GitRepositoryService {
 
         val options = mutableListOf<RepoOption>()
         for ((rootPath, repoName) in repoRoots) {
-            options.add(RepoOption(displayName = "$repoName (전체)", rootPath = rootPath, moduleSubPath = null))
+            options.add(
+                RepoOption(
+                    displayName = "$repoName (전체)",
+                    rootPath = rootPath,
+                    moduleSubPath = null,
+                    repoName = repoName
+                )
+            )
             val subModules = discoverSubModules(File(rootPath))
             for (subModule in subModules) {
                 options.add(
                     RepoOption(
                         displayName = "$repoName / $subModule",
                         rootPath = rootPath,
-                        moduleSubPath = subModule
+                        moduleSubPath = subModule,
+                        repoName = repoName
                     )
                 )
             }
@@ -417,6 +424,9 @@ object GitRepositoryService {
             return FileHistoryResult(filePath, resolvedBranch, startDate, endDate, false, emptyList(), 0)
         }
 
+        val cleanBranchName = resolvedBranch.trim().ifBlank { "HEAD" }
+        val unreleasedLabel = "Unreleased ($cleanBranchName)"
+
         // Check if repository has any tags in 1 lightweight call
         val showRefOut = GitCommandRunner.runReadOnly(
             project = project,
@@ -433,7 +443,8 @@ object GitRepositoryService {
                 project = project,
                 repoRootPath = repoRootPath,
                 branch = resolvedBranch,
-                targetHashes = targetHashes
+                targetHashes = targetHashes,
+                unreleasedLabel = unreleasedLabel
             )
 
             // Preserve branch newest-to-oldest group order
@@ -443,7 +454,7 @@ object GitRepositoryService {
                 val pathAtCommit = fileAtCommit?.path ?: filePath
                 val status = fileAtCommit?.status ?: FileChangeStatus.MODIFIED
                 val oldPath = fileAtCommit?.oldPath
-                val tagLabel = commitToTag[commit.hash] ?: "Unreleased (HEAD)"
+                val tagLabel = commitToTag[commit.hash] ?: unreleasedLabel
 
                 groupedMap.computeIfAbsent(tagLabel) { mutableListOf() }.add(
                     FileHistoryCommitEntry(
@@ -456,53 +467,60 @@ object GitRepositoryService {
                 )
             }
 
-            val groups = groupedMap.map { (label, entries) ->
-                FileHistoryVersionGroup(
-                    groupLabel = label,
-                    isTagGroup = true,
-                    entries = entries
-                )
-            }
-            return FileHistoryResult(
-                targetFilePath = filePath,
-                branch = resolvedBranch,
-                startDate = startDate,
-                endDate = endDate,
-                hasTagsInRepo = true,
-                groups = groups,
-                totalCommits = commits.size
-            )
-        } else {
-            // No tags in repo: group by Date / Work Episode automatically
-            val episodes = EpisodeGrouper.groupIntoEpisodes(commits)
-            val groups = episodes.map { ep ->
-                val label = "${ep.date} | ${ep.authorName}"
-                val entries = ep.commits.reversed().map { commit ->
-                    val fileAtCommit = commit.files.firstOrNull()
-                    FileHistoryCommitEntry(
-                        commit = commit,
-                        status = fileAtCommit?.status ?: FileChangeStatus.MODIFIED,
-                        pathAtCommit = fileAtCommit?.path ?: filePath,
-                        oldPathAtCommit = fileAtCommit?.oldPath,
-                        versionGroupLabel = label
+            // If zero real tag groups exist (everything fell into a single Unreleased group),
+            // split hierarchically by commit date (YYYY-MM-DD) so commits don't flatten into one group.
+            val hasAnyRealTagGroup = groupedMap.keys.any { it != unreleasedLabel }
+            if (hasAnyRealTagGroup) {
+                val groups = groupedMap.map { (label, entries) ->
+                    FileHistoryVersionGroup(
+                        groupLabel = label,
+                        isTagGroup = true,
+                        entries = entries
                     )
                 }
-                FileHistoryVersionGroup(
-                    groupLabel = label,
-                    isTagGroup = false,
-                    entries = entries
+                return FileHistoryResult(
+                    targetFilePath = filePath,
+                    branch = resolvedBranch,
+                    startDate = startDate,
+                    endDate = endDate,
+                    hasTagsInRepo = true,
+                    groups = groups,
+                    totalCommits = commits.size
                 )
             }
-            return FileHistoryResult(
-                targetFilePath = filePath,
-                branch = resolvedBranch,
-                startDate = startDate,
-                endDate = endDate,
-                hasTagsInRepo = false,
-                groups = groups,
-                totalCommits = commits.size
+        }
+
+        // No tags in repo OR zero tag groups covering this branch -> group by commit date (YYYY-MM-DD)
+        val byDateMap = linkedMapOf<String, MutableList<FileHistoryCommitEntry>>()
+        for (commit in commits) {
+            val dateLabel = commit.timestamp.toLocalDate().format(DATE_FMT)
+            val fileAtCommit = commit.files.firstOrNull()
+            byDateMap.computeIfAbsent(dateLabel) { mutableListOf() }.add(
+                FileHistoryCommitEntry(
+                    commit = commit,
+                    status = fileAtCommit?.status ?: FileChangeStatus.MODIFIED,
+                    pathAtCommit = fileAtCommit?.path ?: filePath,
+                    oldPathAtCommit = fileAtCommit?.oldPath,
+                    versionGroupLabel = dateLabel
+                )
             )
         }
+        val dateGroups = byDateMap.map { (dateLabel, entries) ->
+            FileHistoryVersionGroup(
+                groupLabel = dateLabel,
+                isTagGroup = false,
+                entries = entries
+            )
+        }
+        return FileHistoryResult(
+            targetFilePath = filePath,
+            branch = resolvedBranch,
+            startDate = startDate,
+            endDate = endDate,
+            hasTagsInRepo = false,
+            groups = dateGroups,
+            totalCommits = commits.size
+        )
     }
 
     /**
@@ -513,7 +531,8 @@ object GitRepositoryService {
         project: Project,
         repoRootPath: String,
         branch: String,
-        targetHashes: Set<String>
+        targetHashes: Set<String>,
+        unreleasedLabel: String
     ): Map<String, String> {
         // Fast check whether branch history has any tags at all via --simplify-by-decoration
         val decoCheck = GitCommandRunner.runReadOnly(
@@ -529,7 +548,7 @@ object GitRepositoryService {
             timeoutSeconds = 15
         )
         if (decoCheck.exitCode != 0 || !decoCheck.stdout.contains("tag: refs/tags/")) {
-            return targetHashes.associateWith { "Unreleased (HEAD)" }
+            return targetHashes.associateWith { unreleasedLabel }
         }
 
         // Single pass walking branch commits newest -> oldest to propagate the first tag covering each commit
@@ -546,11 +565,11 @@ object GitRepositoryService {
             timeoutSeconds = 20
         )
         if (walkOut.exitCode != 0) {
-            return targetHashes.associateWith { "Unreleased (HEAD)" }
+            return targetHashes.associateWith { unreleasedLabel }
         }
 
         val result = linkedMapOf<String, String>()
-        var currentCoveringTag = "Unreleased (HEAD)"
+        var currentCoveringTag = unreleasedLabel
 
         for (line in walkOut.stdout.lineSequence()) {
             if (line.isBlank()) continue
