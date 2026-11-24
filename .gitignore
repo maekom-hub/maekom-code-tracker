@@ -1,9 +1,39 @@
+# Gradle & IntelliJ Platform caches/builds
 .gradle/
 .intellijPlatform/
 build/
 out/
+.kotlin/
+bin/
+
+# IDE & OS temporary files
 .idea/
 *.iml
-.kotlin/
+*.iws
+*.ipr
+.vscode/
 .DS_Store
+Thumbs.db
+*.swp
+*.swo
+*~
+
+# Local-only management scripts & agent instructions
+AGENTS.md
+GEMINI.md
+manage.sh
+*.local.sh
+deploy*.sh
+release*.sh
+
+# Secrets, local configs & logs/dumps
+.maekom/
+.env
+.env.*
+local.properties
+*.pem
+*.key
+*.p12
+*.jks
 *.log
+*.hprof
