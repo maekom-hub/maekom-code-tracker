@@ -1,6 +1,7 @@
 package com.maekom.codetracker.ui
 
 import com.intellij.icons.AllIcons
+import com.intellij.ide.BrowserUtil
 import com.intellij.openapi.application.ApplicationManager
 import com.intellij.openapi.ide.CopyPasteManager
 import com.intellij.openapi.progress.ProgressIndicator
@@ -35,10 +36,13 @@ import com.maekom.codetracker.model.PrimaryLayer
 import com.maekom.codetracker.model.RepoOption
 import com.maekom.codetracker.model.StackTag
 import com.maekom.codetracker.model.WorkEpisode
+import com.maekom.codetracker.update.PluginUpdateChecker
+import com.maekom.codetracker.update.UpdateCheckResult
 import java.awt.BorderLayout
 import java.awt.Color
 import java.awt.Dimension
 import java.awt.FlowLayout
+import java.awt.Font
 import java.awt.GridBagConstraints
 import java.awt.GridBagLayout
 import java.awt.datatransfer.StringSelection
@@ -75,6 +79,12 @@ class CodeTrackerPanel(private val project: Project) : JBPanel<CodeTrackerPanel>
         private val DATE_FMT = DateTimeFormatter.ISO_LOCAL_DATE
         private val TIME_FMT = DateTimeFormatter.ofPattern("HH:mm")
     }
+
+    // Top Title Header Bar Controls
+    private val versionLabel = JBLabel("v${PluginUpdateChecker.getCurrentVersion()}").apply {
+        foreground = JBColor.GRAY
+    }
+    private val checkUpdateButton = JButton("업데이트 확인")
 
     // Top Filter & Action Controls
     private val repoCombo = ComboBox<RepoOption>()
@@ -162,7 +172,11 @@ class CodeTrackerPanel(private val project: Project) : JBPanel<CodeTrackerPanel>
 
     private fun buildLayout() {
         val topContainer = JPanel(BorderLayout())
-        topContainer.add(buildFilterBar(), BorderLayout.NORTH)
+        val headerAndFilterPanel = JPanel(BorderLayout()).apply {
+            add(buildHeaderBar(), BorderLayout.NORTH)
+            add(buildFilterBar(), BorderLayout.CENTER)
+        }
+        topContainer.add(headerAndFilterPanel, BorderLayout.NORTH)
         topContainer.add(buildSummaryStrip(), BorderLayout.SOUTH)
         add(topContainer, BorderLayout.NORTH)
 
@@ -206,6 +220,27 @@ class CodeTrackerPanel(private val project: Project) : JBPanel<CodeTrackerPanel>
             secondComponent = rightSplitter
         }
         add(masterDetailSplitter, BorderLayout.CENTER)
+    }
+
+    private fun buildHeaderBar(): JPanel {
+        val titleLabel = JBLabel("Maekom Code Tracker").apply {
+            font = font.deriveFont(Font.BOLD, font.size2D + 1f)
+        }
+
+        val rightActions = JPanel(FlowLayout(FlowLayout.RIGHT, 6, 0)).apply {
+            isOpaque = false
+            add(versionLabel)
+            add(checkUpdateButton)
+        }
+
+        return JPanel(BorderLayout()).apply {
+            border = JBUI.Borders.compound(
+                JBUI.Borders.customLine(JBColor.border(), 0, 0, 1, 0),
+                JBUI.Borders.empty(3, 8, 4, 4)
+            )
+            add(titleLabel, BorderLayout.WEST)
+            add(rightActions, BorderLayout.EAST)
+        }
     }
 
     private fun buildFilterBar(): JPanel {
@@ -262,6 +297,8 @@ class CodeTrackerPanel(private val project: Project) : JBPanel<CodeTrackerPanel>
     }
 
     private fun wireListeners() {
+        checkUpdateButton.addActionListener { checkForPluginUpdates() }
+
         refreshReposButton.addActionListener { loadRepositoriesAsync() }
 
         repoCombo.addActionListener {
@@ -801,6 +838,80 @@ class CodeTrackerPanel(private val project: Project) : JBPanel<CodeTrackerPanel>
             commit = commit,
             file = fileDetail.summary
         )
+    }
+
+    private fun checkForPluginUpdates() {
+        checkUpdateButton.isEnabled = false
+        val originalText = checkUpdateButton.text
+        checkUpdateButton.text = "확인 중..."
+
+        ProgressManager.getInstance().run(object : Task.Backgroundable(
+            project,
+            "Maekom Code Tracker: 최신 버전 확인 중",
+            true
+        ) {
+            override fun run(indicator: ProgressIndicator) {
+                indicator.isIndeterminate = true
+                val result = PluginUpdateChecker.checkLatestRelease()
+
+                ApplicationManager.getApplication().invokeLater {
+                    if (project.isDisposed) return@invokeLater
+                    checkUpdateButton.isEnabled = true
+                    checkUpdateButton.text = originalText
+                    versionLabel.text = "v${result.currentVersion}"
+
+                    when (result) {
+                        is UpdateCheckResult.UpdateAvailable -> {
+                            val message = buildString {
+                                appendLine("새 버전의 Maekom Code Tracker가 출시되었습니다.")
+                                appendLine()
+                                appendLine("현재 버전: v${result.currentVersion}")
+                                appendLine("최신 버전: v${result.latestVersion}")
+                                appendLine("직접 다운로드 URL:")
+                                appendLine(result.directDownloadUrl)
+                                appendLine()
+                                append("GitHub 릴리즈 페이지를 브라우저에서 여시겠습니까?")
+                            }
+                            val choice = Messages.showYesNoDialog(
+                                project,
+                                message,
+                                "Maekom Code Tracker - 업데이트 안내",
+                                "릴리즈 페이지 열기",
+                                "닫기",
+                                Messages.getInformationIcon()
+                            )
+                            if (choice == Messages.YES) {
+                                BrowserUtil.browse(result.releasePageUrl)
+                            }
+                        }
+
+                        is UpdateCheckResult.UpToDate -> {
+                            Messages.showInfoMessage(
+                                project,
+                                "현재 최신 버전(v${result.currentVersion})을 사용 중입니다.",
+                                "Maekom Code Tracker - 업데이트 확인"
+                            )
+                        }
+
+                        is UpdateCheckResult.NoReleaseYet -> {
+                            Messages.showInfoMessage(
+                                project,
+                                result.message,
+                                "Maekom Code Tracker - 업데이트 확인"
+                            )
+                        }
+
+                        is UpdateCheckResult.Error -> {
+                            Messages.showWarningDialog(
+                                project,
+                                result.message,
+                                "Maekom Code Tracker - 업데이트 확인 실패"
+                            )
+                        }
+                    }
+                }
+            }
+        })
     }
 
     private fun copySelectedAsMarkdown() {
