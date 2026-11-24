@@ -211,6 +211,7 @@ object UnifiedDiffParser {
         var hunkSignatureText: String? = null
         var hunkHasHeaderTransactional = false
         val hunkChangedLines = mutableListOf<String>()
+        val hunkRawLines = mutableListOf<String>()
         var inHunk = false
 
         fun flushCurrentHunk() {
@@ -246,7 +247,8 @@ object UnifiedDiffParser {
                     displayContext = displayContext.take(120),
                     addedLines = hunkAdded,
                     deletedLines = hunkDeleted,
-                    firstChangedCodeLine = firstChangedCodeLine
+                    firstChangedCodeLine = firstChangedCodeLine,
+                    rawDiffLines = hunkRawLines.toList()
                 )
             )
         }
@@ -272,10 +274,14 @@ object UnifiedDiffParser {
                 hunkHasHeaderTransactional = isSubstantiveCodeLine(currentHeaderContext) &&
                     stripInlineComment(currentHeaderContext).contains("@Transactional")
                 hunkChangedLines.clear()
+                hunkRawLines.clear()
                 continue
             }
 
             if (!inHunk) continue
+            if (hunkRawLines.size < 400) {
+                hunkRawLines.add(line)
+            }
 
             when {
                 line.startsWith("+") && !line.startsWith("+++") -> {

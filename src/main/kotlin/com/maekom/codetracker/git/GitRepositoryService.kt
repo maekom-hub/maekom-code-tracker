@@ -198,7 +198,8 @@ object GitRepositoryService {
             "--since=${filter.startDate.format(DATE_FMT)} 00:00:00",
             "--until=${filter.endDate.format(DATE_FMT)} 23:59:59",
             "--find-renames",
-            "--name-status",
+            "--raw",
+            "--numstat",
             "--pretty=format:$prettyFormat"
         )
         if (filter.excludeMerges) {
@@ -288,13 +289,63 @@ object GitRepositoryService {
     }
 
     private fun parseNameStatusLines(filesPart: String): List<FileSummary> {
-        val result = mutableListOf<FileSummary>()
+        val rawFiles = linkedMapOf<String, FileSummary>()
+        val numstatCounts = linkedMapOf<String, Pair<Int, Int>>()
+
         for (rawLine in filesPart.lineSequence()) {
             val line = rawLine.trim()
             if (line.isEmpty()) continue
+
+            // Format A: `--raw` line -> :100644 100644 sha1 sha2 M\tpath  OR  :100644 ... R100\told\tnew
+            if (line.startsWith(":")) {
+                val tabParts = line.split('\t')
+                if (tabParts.size < 2) continue
+                val metaTokens = tabParts[0].trim().split(Regex("\\s+"))
+                val statusToken = metaTokens.lastOrNull() ?: continue
+                val status = FileChangeStatus.fromGitCode(statusToken)
+                val oldPath: String?
+                val newPath: String
+                if ((status == FileChangeStatus.RENAMED || status == FileChangeStatus.COPIED) && tabParts.size >= 3) {
+                    oldPath = tabParts[1].trim()
+                    newPath = tabParts[2].trim()
+                } else {
+                    oldPath = null
+                    newPath = tabParts[1].trim()
+                }
+                if (newPath.isBlank()) continue
+                rawFiles[newPath] = FileSummary(
+                    path = newPath,
+                    oldPath = oldPath,
+                    status = status,
+                    primaryLayer = LayerClassifier.classifyPrimaryLayer(newPath)
+                )
+                continue
+            }
+
             val parts = line.split('\t')
             if (parts.size < 2) continue
 
+            // Format B: `--numstat` line -> 42\t11\tpath  OR  -\t-\tbinaryPath
+            val isNumstat = parts.size >= 3 &&
+                (parts[0] == "-" || parts[0].all { it.isDigit() }) &&
+                (parts[1] == "-" || parts[1].all { it.isDigit() })
+            if (isNumstat) {
+                val added = parts[0].toIntOrNull() ?: 0
+                val deleted = parts[1].toIntOrNull() ?: 0
+                val rawPathField = parts.subList(2, parts.size).joinToString("\t").trim()
+                val resolvedPath = resolveNumstatPath(rawPathField)
+                if (resolvedPath.isNotBlank()) {
+                    val prev = numstatCounts[resolvedPath]
+                    numstatCounts[resolvedPath] = if (prev != null) {
+                        (prev.first + added) to (prev.second + deleted)
+                    } else {
+                        added to deleted
+                    }
+                }
+                continue
+            }
+
+            // Format C: `--name-status` line -> M\tpath OR R100\told\tnew
             val status = FileChangeStatus.fromGitCode(parts[0])
             val oldPath: String?
             val newPath: String
@@ -307,16 +358,55 @@ object GitRepositoryService {
             }
 
             if (newPath.isBlank()) continue
-            result.add(
-                FileSummary(
-                    path = newPath,
-                    oldPath = oldPath,
-                    status = status,
-                    primaryLayer = LayerClassifier.classifyPrimaryLayer(newPath)
-                )
+            rawFiles[newPath] = FileSummary(
+                path = newPath,
+                oldPath = oldPath,
+                status = status,
+                primaryLayer = LayerClassifier.classifyPrimaryLayer(newPath)
             )
         }
-        return result
+
+        if (rawFiles.isEmpty() && numstatCounts.isNotEmpty()) {
+            return numstatCounts.map { (path, counts) ->
+                FileSummary(
+                    path = path,
+                    status = FileChangeStatus.MODIFIED,
+                    primaryLayer = LayerClassifier.classifyPrimaryLayer(path),
+                    addedLines = counts.first,
+                    deletedLines = counts.second
+                )
+            }
+        }
+
+        return rawFiles.values.map { fs ->
+            val counts = numstatCounts[fs.path]
+            if (counts != null) {
+                fs.copy(addedLines = counts.first, deletedLines = counts.second)
+            } else {
+                fs
+            }
+        }
+    }
+
+    private fun resolveNumstatPath(raw: String): String {
+        // Handle git rename shorthand: "src/{old => new}/Foo.java" or "old.java => new.java"
+        val braceStart = raw.indexOf('{')
+        val braceEnd = raw.indexOf('}')
+        if (braceStart >= 0 && braceEnd > braceStart) {
+            val inside = raw.substring(braceStart + 1, braceEnd)
+            val arrowIdx = inside.indexOf(" => ")
+            if (arrowIdx >= 0) {
+                val newPart = inside.substring(arrowIdx + 4)
+                val prefix = raw.substring(0, braceStart)
+                val suffix = raw.substring(braceEnd + 1)
+                return (prefix + newPart + suffix).replace("//", "/")
+            }
+        }
+        val arrowIdx = raw.indexOf(" => ")
+        if (arrowIdx >= 0) {
+            return raw.substring(arrowIdx + 4).trim()
+        }
+        return raw.trim()
     }
 
     /**

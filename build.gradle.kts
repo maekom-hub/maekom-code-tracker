@@ -7,7 +7,7 @@ plugins {
 }
 
 group = "com.maekom"
-version = "0.1.8"
+version = "0.2.0"
 
 repositories {
     mavenCentral()
@@ -21,6 +21,7 @@ dependencies {
 
     intellijPlatform {
         intellijIdeaCommunity("2024.2.4")
+        bundledPlugin("com.intellij.java")
         bundledPlugin("Git4Idea")
     }
 }

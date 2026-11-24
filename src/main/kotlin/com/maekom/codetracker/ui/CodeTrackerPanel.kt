@@ -29,6 +29,7 @@ import com.intellij.ui.components.JBTextField
 import com.intellij.ui.treeStructure.Tree
 import com.intellij.util.ui.JBUI
 import com.intellij.util.ui.WrapLayout
+import com.maekom.codetracker.analysis.ArchitectureFlowBuilder
 import com.maekom.codetracker.analysis.EpisodeGrouper
 import com.maekom.codetracker.analysis.MarkdownReportExporter
 import com.maekom.codetracker.analysis.RationaleAndCheckEngine
@@ -40,14 +41,19 @@ import com.maekom.codetracker.model.CodeHunkPointer
 import com.maekom.codetracker.model.CommitDetail
 import com.maekom.codetracker.model.CommitSummary
 import com.maekom.codetracker.model.FileDiffDetail
+import com.maekom.codetracker.model.FlowMergedFile
+import com.maekom.codetracker.model.FlowStageGroup
 import com.maekom.codetracker.model.LayerFilterOption
+import com.maekom.codetracker.model.MergedFileAnalysisDetail
 import com.maekom.codetracker.model.PrimaryLayer
+import com.maekom.codetracker.model.RadarSeverity
 import com.maekom.codetracker.model.RepoOption
 import com.maekom.codetracker.model.StackTag
 import com.maekom.codetracker.model.WorkEpisode
 import com.maekom.codetracker.update.PluginUpdateChecker
 import com.maekom.codetracker.update.UpdateCheckResult
 import java.awt.BorderLayout
+import java.awt.CardLayout
 import java.awt.Color
 import java.awt.Dimension
 import java.awt.FlowLayout
@@ -63,6 +69,8 @@ import java.time.format.DateTimeFormatter
 import java.time.format.DateTimeParseException
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
+import javax.swing.ButtonGroup
 import javax.swing.DefaultComboBoxModel
 import javax.swing.JButton
 import javax.swing.JComponent
@@ -70,12 +78,14 @@ import javax.swing.JEditorPane
 import javax.swing.JMenuItem
 import javax.swing.JPanel
 import javax.swing.JPopupMenu
+import javax.swing.JToggleButton
 import javax.swing.JTree
 import javax.swing.SwingUtilities
 import javax.swing.ToolTipManager
 import javax.swing.UIManager
 import javax.swing.event.DocumentEvent
 import javax.swing.event.DocumentListener
+import javax.swing.event.HyperlinkEvent
 import javax.swing.text.html.HTMLEditorKit
 import javax.swing.tree.DefaultMutableTreeNode
 import javax.swing.tree.DefaultTreeModel
@@ -94,6 +104,8 @@ class CodeTrackerPanel(
     companion object {
         private val DATE_FMT = DateTimeFormatter.ISO_LOCAL_DATE
         private val TIME_FMT = DateTimeFormatter.ofPattern("HH:mm")
+        private const val CARD_TIMELINE = "TIMELINE"
+        private const val CARD_FLOW = "FLOW"
     }
 
     private data class AuthorOption(val rawName: String?) {
@@ -137,10 +149,25 @@ class CodeTrackerPanel(
     // Summary Strip
     private val summaryLabel = JBLabel(CodeTrackerI18n.initialSummaryText())
 
-    // Left Panel: Episode & Commit Timeline Tree
+    // Left Panel: View Mode Toggle + Timeline Tree + 5-Stage Execution Flow Tree
+    private val timelineModeButton = JToggleButton(CodeTrackerI18n.viewModeTimeline(), true).apply {
+        isFocusable = false
+        margin = JBUI.insets(2, 6, 2, 6)
+    }
+    private val flowModeButton = JToggleButton(CodeTrackerI18n.viewModeExecutionFlow(), false).apply {
+        isFocusable = false
+        margin = JBUI.insets(2, 6, 2, 6)
+    }
+    private val leftCardLayout = CardLayout()
+    private val leftCardPanel = JPanel(leftCardLayout)
+
     private val timelineRoot = DefaultMutableTreeNode("Timeline")
     private val timelineModel = DefaultTreeModel(timelineRoot)
     private val timelineTree = Tree(timelineModel)
+
+    private val flowRoot = DefaultMutableTreeNode("ExecutionFlow")
+    private val flowModel = DefaultTreeModel(flowRoot)
+    private val flowTree = Tree(flowModel)
 
     // Right Top Panel: Rationale & Architecture Check
     private val rationalePane = JEditorPane().apply {
@@ -165,7 +192,10 @@ class CodeTrackerPanel(
     private var selectedCommit: CommitSummary? = null
     private var selectedEpisode: WorkEpisode? = null
     private var selectedDetail: CommitDetail? = null
+    private var selectedMergedDetail: MergedFileAnalysisDetail? = null
     private val detailCache = ConcurrentHashMap<String, CommitDetail>()
+    private val mergedFileCache = ConcurrentHashMap<String, MergedFileAnalysisDetail>()
+    private val mergedLoadSeq = AtomicInteger(0)
     private var suppressComboListeners = false
     private val repoInitInProgress = AtomicBoolean(false)
     private val pendingRepoInit = AtomicBoolean(false)
@@ -176,14 +206,18 @@ class CodeTrackerPanel(
     // Tree node payloads
     private data class EpisodeNodeData(val episode: WorkEpisode)
     private data class CommitNodeData(val commit: CommitSummary, val episode: WorkEpisode)
+    private data class FlowStageNodeData(val group: FlowStageGroup)
+    private data class FlowMergedFileNodeData(val mergedFile: FlowMergedFile)
     private data class LayerGroupNodeData(val layer: PrimaryLayer, val fileCount: Int)
-    private data class FileNodeData(val fileDetail: FileDiffDetail)
-    private data class HunkNodeData(val fileDetail: FileDiffDetail, val pointer: CodeHunkPointer)
+    private data class MergedCommitGroupNodeData(val commit: CommitSummary, val fileDetail: FileDiffDetail)
+    private data class FileNodeData(val fileDetail: FileDiffDetail, val overrideCommit: CommitSummary? = null)
+    private data class HunkNodeData(val fileDetail: FileDiffDetail, val pointer: CodeHunkPointer, val overrideCommit: CommitSummary? = null)
     private data class PointerMdNoteNodeData(
         val fileDetail: FileDiffDetail,
         val pointer: CodeHunkPointer,
         val shortNote: String,
-        val fullNote: String
+        val fullNote: String,
+        val overrideCommit: CommitSummary? = null
     )
 
     init {
@@ -228,12 +262,22 @@ class CodeTrackerPanel(
         timelineTree.selectionModel.selectionMode = TreeSelectionModel.SINGLE_TREE_SELECTION
         timelineTree.cellRenderer = TimelineTreeCellRenderer()
 
+        flowTree.isRootVisible = false
+        flowTree.showsRootHandles = true
+        flowTree.toggleClickCount = 0
+        flowTree.selectionModel.selectionMode = TreeSelectionModel.SINGLE_TREE_SELECTION
+        flowTree.cellRenderer = ExecutionFlowTreeCellRenderer()
+
         pointerTree.isRootVisible = false
         pointerTree.showsRootHandles = true
         pointerTree.toggleClickCount = 0
         pointerTree.selectionModel.selectionMode = TreeSelectionModel.SINGLE_TREE_SELECTION
         pointerTree.cellRenderer = PointerTreeCellRenderer()
         ToolTipManager.sharedInstance().registerComponent(pointerTree)
+
+        val modeGroup = ButtonGroup()
+        modeGroup.add(timelineModeButton)
+        modeGroup.add(flowModeButton)
 
         applyStaticTexts()
     }
@@ -264,24 +308,26 @@ class CodeTrackerPanel(
         copyMarkdownButton.toolTipText = CodeTrackerI18n.copyMarkdownTooltip()
         openDiffButton.toolTipText = CodeTrackerI18n.openDiffTooltip()
 
+        timelineModeButton.text = CodeTrackerI18n.viewModeTimeline()
+        flowModeButton.text = CodeTrackerI18n.viewModeExecutionFlow()
         leftHeaderLabel.text = CodeTrackerI18n.timelinePanelTitle()
         rightTopHeaderLabel.text = CodeTrackerI18n.rationalePanelTitle()
         rightBottomHeaderLabel.text = CodeTrackerI18n.pointerPanelTitle()
 
         timelineTree.emptyText.text = CodeTrackerI18n.timelineEmptyText()
+        flowTree.emptyText.text = CodeTrackerI18n.flowEmptyText()
         pointerTree.emptyText.text = CodeTrackerI18n.pointerEmptyText()
     }
 
     /**
      * Zero-restart live localization update preserving all combo selections,
-     * tree expansion states, and currently selected commit/pointer.
+     * tree expansion states, and currently selected commit/pointer/merged file.
      */
     private fun applyLocalization() {
         if (project.isDisposed) return
 
         applyStaticTexts()
 
-        // Repaint combo boxes so dynamic toString() ("전체" <-> "All") refreshes without changing selected index
         repoCombo.revalidate()
         repoCombo.repaint()
         authorCombo.revalidate()
@@ -289,7 +335,6 @@ class CodeTrackerPanel(
         layerFilterCombo.revalidate()
         layerFilterCombo.repaint()
 
-        // Refresh summary strip
         val result = currentResult
         if (result != null) {
             updateSummaryStrip(lastFilteredCommits, result.filter.repo.rootPath, result.truncatedToLimit)
@@ -301,23 +346,32 @@ class CodeTrackerPanel(
             }
         }
 
-        // Refresh left timeline tree labels without collapsing/deselecting
         timelineTree.revalidate()
         timelineTree.repaint()
+        flowTree.revalidate()
+        flowTree.repaint()
 
-        // Re-render right rationale & smart pointer tree preserving expansion and selection
+        val merged = selectedMergedDetail
         val detail = selectedDetail
-        if (detail != null) {
-            rationalePane.text = RationaleHtmlRenderer.renderCommitDetail(detail)
-            rationalePane.caretPosition = 0
-            rebuildPointerTreePreservingState(detail)
-        } else {
-            val placeholder = when {
-                result == null -> CodeTrackerI18n.rationaleInitialPlaceholder()
-                result.commits.isEmpty() -> CodeTrackerI18n.rationaleNoCommitsPlaceholder()
-                else -> CodeTrackerI18n.rationaleSelectCommitPlaceholder()
+        when {
+            merged != null -> {
+                rationalePane.text = RationaleHtmlRenderer.renderMergedFileDetail(merged)
+                rationalePane.caretPosition = 0
+                rebuildPointerTreeForMergedFile(merged)
             }
-            rationalePane.text = RationaleHtmlRenderer.renderPlaceholder(placeholder)
+            detail != null -> {
+                rationalePane.text = RationaleHtmlRenderer.renderCommitDetail(detail)
+                rationalePane.caretPosition = 0
+                rebuildPointerTreePreservingState(detail)
+            }
+            else -> {
+                val placeholder = when {
+                    result == null -> CodeTrackerI18n.rationaleInitialPlaceholder()
+                    result.commits.isEmpty() -> CodeTrackerI18n.rationaleNoCommitsPlaceholder()
+                    else -> CodeTrackerI18n.rationaleSelectCommitPlaceholder()
+                }
+                rationalePane.text = RationaleHtmlRenderer.renderPlaceholder(placeholder)
+            }
         }
 
         topContainer.revalidate()
@@ -370,10 +424,19 @@ class CodeTrackerPanel(
             secondComponent = rightBottomPanel
         }
 
+        leftCardPanel.add(JBScrollPane(timelineTree), CARD_TIMELINE)
+        leftCardPanel.add(JBScrollPane(flowTree), CARD_FLOW)
+
+        val leftModeBar = JPanel(FlowLayout(FlowLayout.LEFT, 4, 2)).apply {
+            border = JBUI.Borders.customLine(JBColor.border(), 0, 0, 1, 0)
+            add(timelineModeButton)
+            add(flowModeButton)
+        }
+
         val leftPanel = JPanel(BorderLayout()).apply {
             border = JBUI.Borders.customLine(JBColor.border(), 1)
-            add(leftHeaderLabel, BorderLayout.NORTH)
-            add(JBScrollPane(timelineTree), BorderLayout.CENTER)
+            add(leftModeBar, BorderLayout.NORTH)
+            add(leftCardPanel, BorderLayout.CENTER)
         }
 
         val masterDetailSplitter = JBSplitter(false, 0.36f).apply {
@@ -422,6 +485,19 @@ class CodeTrackerPanel(
     }
 
     private fun wireListeners() {
+        timelineModeButton.addActionListener {
+            leftCardLayout.show(leftCardPanel, CARD_TIMELINE)
+        }
+        flowModeButton.addActionListener {
+            leftCardLayout.show(leftCardPanel, CARD_FLOW)
+        }
+
+        // Clickable Entrypoint chips (ep:<idx>) & Side-Effect Radar items (radar:<idx>)
+        rationalePane.addHyperlinkListener { e ->
+            if (e.eventType != HyperlinkEvent.EventType.ACTIVATED) return@addHyperlinkListener
+            handleRationaleHyperlink(e.description ?: return@addHyperlinkListener)
+        }
+
         repoCombo.addActionListener {
             val repo = repoCombo.selectedItem as? RepoOption
             repoCombo.toolTipText = repo?.localizedDisplayName() ?: CodeTrackerI18n.repoTooltip()
@@ -470,6 +546,7 @@ class CodeTrackerPanel(
             val node = timelineTree.lastSelectedPathComponent as? DefaultMutableTreeNode ?: return@addTreeSelectionListener
             when (val obj = node.userObject) {
                 is CommitNodeData -> {
+                    selectedMergedDetail = null
                     selectedCommit = obj.commit
                     selectedEpisode = obj.episode
                     loadCommitDetailOnDemand(obj.commit)
@@ -480,6 +557,41 @@ class CodeTrackerPanel(
             }
         }
 
+        // 5-Stage Execution Flow Tree: single-click -> aggregated on-demand detail; double-click -> FileHistoryDialog
+        flowTree.addTreeSelectionListener {
+            val node = flowTree.lastSelectedPathComponent as? DefaultMutableTreeNode ?: return@addTreeSelectionListener
+            val mergedNode = node.userObject as? FlowMergedFileNodeData ?: return@addTreeSelectionListener
+            loadMergedFlowFileOnDemand(mergedNode.mergedFile)
+        }
+
+        flowTree.addMouseListener(object : MouseAdapter() {
+            override fun mouseClicked(e: MouseEvent) {
+                if (SwingUtilities.isLeftMouseButton(e) && e.clickCount == 2) {
+                    val path = flowTree.getPathForLocation(e.x, e.y) ?: return
+                    val node = path.lastPathComponent as? DefaultMutableTreeNode ?: return
+                    val mergedNode = node.userObject as? FlowMergedFileNodeData ?: return
+                    openFileHistoryDialogByPath(mergedNode.mergedFile.path)
+                }
+            }
+
+            override fun mousePressed(e: MouseEvent) = maybeShowFlowPopup(e)
+            override fun mouseReleased(e: MouseEvent) = maybeShowFlowPopup(e)
+
+            private fun maybeShowFlowPopup(e: MouseEvent) {
+                if (!e.isPopupTrigger) return
+                val path = flowTree.getPathForLocation(e.x, e.y) ?: return
+                flowTree.selectionPath = path
+                val node = path.lastPathComponent as? DefaultMutableTreeNode ?: return
+                val mergedNode = node.userObject as? FlowMergedFileNodeData ?: return
+
+                val popup = JPopupMenu()
+                popup.add(JMenuItem(CodeTrackerI18n.menuFileHistory()).apply {
+                    addActionListener { openFileHistoryDialogByPath(mergedNode.mergedFile.path) }
+                })
+                popup.show(flowTree, e.x, e.y)
+            }
+        })
+
         // Pointer tree click -> smart code navigation / file history dialog; right-click -> popup menu
         pointerTree.addMouseListener(object : MouseAdapter() {
             override fun mouseClicked(e: MouseEvent) {
@@ -489,12 +601,12 @@ class CodeTrackerPanel(
                     when (val obj = node.userObject) {
                         is HunkNodeData -> {
                             if (e.clickCount >= 1) {
-                                navigateToFileOrHunk(obj.fileDetail, obj.pointer)
+                                navigateToFileOrHunk(obj.fileDetail, obj.pointer, obj.overrideCommit)
                             }
                         }
                         is PointerMdNoteNodeData -> {
                             if (e.clickCount >= 1) {
-                                navigateToFileOrHunk(obj.fileDetail, obj.pointer)
+                                navigateToFileOrHunk(obj.fileDetail, obj.pointer, obj.overrideCommit)
                             }
                         }
                         is FileNodeData -> {
@@ -523,9 +635,9 @@ class CodeTrackerPanel(
                 if (e.keyCode == KeyEvent.VK_ENTER) {
                     val node = pointerTree.lastSelectedPathComponent as? DefaultMutableTreeNode ?: return
                     when (val obj = node.userObject) {
-                        is HunkNodeData -> navigateToFileOrHunk(obj.fileDetail, obj.pointer)
-                        is PointerMdNoteNodeData -> navigateToFileOrHunk(obj.fileDetail, obj.pointer)
-                        is FileNodeData -> navigateToFileOrHunk(obj.fileDetail, obj.fileDetail.hunks.firstOrNull())
+                        is HunkNodeData -> navigateToFileOrHunk(obj.fileDetail, obj.pointer, obj.overrideCommit)
+                        is PointerMdNoteNodeData -> navigateToFileOrHunk(obj.fileDetail, obj.pointer, obj.overrideCommit)
+                        is FileNodeData -> navigateToFileOrHunk(obj.fileDetail, obj.fileDetail.hunks.firstOrNull(), obj.overrideCommit)
                     }
                 }
             }
@@ -534,21 +646,69 @@ class CodeTrackerPanel(
         openDiffButton.addActionListener { openDiffForSelectedPointerNode() }
     }
 
+    private fun handleRationaleHyperlink(desc: String) {
+        val result = currentResult ?: return
+        val repoRoot = result.filter.repo.rootPath
+        val merged = selectedMergedDetail
+        val detail = selectedDetail
+
+        when {
+            desc.startsWith("ep:") -> {
+                val idx = desc.removePrefix("ep:").toIntOrNull() ?: return
+                val ep = merged?.entrypointTrace?.entrypoints?.getOrNull(idx)
+                    ?: detail?.entrypointTrace?.entrypoints?.getOrNull(idx)
+                    ?: return
+                CodeNavigator.navigateToAbsoluteFileLine(project, ep.filePath, ep.lineNumber1Based)
+            }
+
+            desc.startsWith("radar:") -> {
+                val idx = desc.removePrefix("radar:").toIntOrNull() ?: return
+                val alert = merged?.sideEffectAlerts?.getOrNull(idx)
+                    ?: detail?.sideEffectAlerts?.getOrNull(idx)
+                    ?: return
+                val commit = merged?.commitSections?.firstOrNull { it.commit.hash == alert.commitHash }?.commit
+                    ?: merged?.commitSections?.firstOrNull()?.commit
+                    ?: selectedCommit
+                    ?: return
+                val fileSummary = detail?.fileDetails?.firstOrNull { it.summary.path == alert.filePath }?.summary
+                    ?: merged?.commitSections?.firstOrNull { it.fileDetail.summary.path == alert.filePath }?.fileDetail?.summary
+                    ?: commit.files.firstOrNull { it.path == alert.filePath }
+                    ?: return
+                CodeNavigator.navigateToPointer(
+                    project = project,
+                    repoRootPath = repoRoot,
+                    commit = commit,
+                    file = fileSummary,
+                    pointer = alert.hunkPointer
+                )
+            }
+        }
+    }
+
     private fun showPointerContextMenu(node: DefaultMutableTreeNode, e: MouseEvent) {
         val fileDetail: FileDiffDetail?
         val pointer: CodeHunkPointer?
+        val overrideCommit: CommitSummary?
         when (val obj = node.userObject) {
             is FileNodeData -> {
                 fileDetail = obj.fileDetail
                 pointer = obj.fileDetail.hunks.firstOrNull()
+                overrideCommit = obj.overrideCommit
+            }
+            is MergedCommitGroupNodeData -> {
+                fileDetail = obj.fileDetail
+                pointer = obj.fileDetail.hunks.firstOrNull()
+                overrideCommit = obj.commit
             }
             is HunkNodeData -> {
                 fileDetail = obj.fileDetail
                 pointer = obj.pointer
+                overrideCommit = obj.overrideCommit
             }
             is PointerMdNoteNodeData -> {
                 fileDetail = obj.fileDetail
                 pointer = obj.pointer
+                overrideCommit = obj.overrideCommit
             }
             else -> return
         }
@@ -561,10 +721,10 @@ class CodeTrackerPanel(
             popup.addSeparator()
         }
         popup.add(JMenuItem(CodeTrackerI18n.menuDiffCompare()).apply {
-            addActionListener { openDiff(fileDetail, pointer) }
+            addActionListener { openDiff(fileDetail, pointer, overrideCommit) }
         })
         popup.add(JMenuItem(CodeTrackerI18n.menuJumpToCode()).apply {
-            addActionListener { navigateToFileOrHunk(fileDetail, pointer) }
+            addActionListener { navigateToFileOrHunk(fileDetail, pointer, overrideCommit) }
         })
         popup.addSeparator()
         popup.add(JMenuItem(CodeTrackerI18n.menuCopyCommitMarkdown()).apply {
@@ -574,6 +734,10 @@ class CodeTrackerPanel(
     }
 
     private fun openFileHistoryDialog(fileDetail: FileDiffDetail) {
+        openFileHistoryDialogByPath(fileDetail.summary.path)
+    }
+
+    private fun openFileHistoryDialogByPath(filePath: String) {
         val repo = currentResult?.filter?.repo ?: (repoCombo.selectedItem as? RepoOption)
         if (repo == null) {
             Messages.showWarningDialog(
@@ -596,7 +760,7 @@ class CodeTrackerPanel(
             branch = branch,
             startDate = startDate,
             endDate = endDate,
-            targetFilePath = fileDetail.summary.path,
+            targetFilePath = filePath,
             noMerges = noMerges
         )
         dialog.show()
@@ -917,6 +1081,7 @@ class CodeTrackerPanel(
                         selectedCommit = null
                         selectedEpisode = null
                         selectedDetail = null
+                        selectedMergedDetail = null
 
                         if (author == null && refreshedAuthors.isNotEmpty()) {
                             suppressComboListeners = true
@@ -980,7 +1145,101 @@ class CodeTrackerPanel(
         lastFilteredCommits = filteredCommits
         val filteredEpisodes = EpisodeGrouper.groupIntoEpisodes(filteredCommits)
         rebuildTimelineTree(filteredEpisodes)
+        rebuildExecutionFlowTree(ArchitectureFlowBuilder.buildExecutionFlow(filteredCommits))
         updateSummaryStrip(filteredCommits, result.filter.repo.rootPath, result.truncatedToLimit)
+    }
+
+    private fun rebuildExecutionFlowTree(groups: List<FlowStageGroup>) {
+        flowRoot.removeAllChildren()
+        for (group in groups) {
+            val stageNode = DefaultMutableTreeNode(FlowStageNodeData(group))
+            for (mf in group.files) {
+                stageNode.add(DefaultMutableTreeNode(FlowMergedFileNodeData(mf)))
+            }
+            flowRoot.add(stageNode)
+        }
+        flowModel.reload()
+        var row = 0
+        while (row < flowTree.rowCount) {
+            flowTree.expandRow(row)
+            row++
+        }
+    }
+
+    private fun loadMergedFlowFileOnDemand(mergedFile: FlowMergedFile) {
+        val result = currentResult ?: return
+        val repoRoot = result.filter.repo.rootPath
+        val requestId = mergedLoadSeq.incrementAndGet()
+        val cacheKey = "$repoRoot::${mergedFile.path}::${mergedFile.commits.firstOrNull()?.hash.orEmpty()}::${mergedFile.modifyCount}"
+
+        val cached = mergedFileCache[cacheKey]
+        if (cached != null) {
+            displayMergedFileDetail(cached)
+            return
+        }
+
+        selectedDetail = null
+        selectedMergedDetail = null
+        rationalePane.text = RationaleHtmlRenderer.renderPlaceholder(
+            CodeTrackerI18n.flowLoadingMergedFile(mergedFile.fileName, mergedFile.commits.size)
+        )
+        rationalePane.caretPosition = 0
+        clearPointerTree()
+
+        ApplicationManager.getApplication().executeOnPooledThread {
+            val computed = runCatching {
+                RationaleAndCheckEngine.analyzeMergedFlowFile(project, repoRoot, mergedFile)
+            }.getOrNull()
+
+            ApplicationManager.getApplication().invokeLater {
+                if (project.isDisposed || mergedLoadSeq.get() != requestId) return@invokeLater
+                if (computed != null) {
+                    mergedFileCache[cacheKey] = computed
+                    displayMergedFileDetail(computed)
+                } else {
+                    rationalePane.text = RationaleHtmlRenderer.renderPlaceholder(
+                        CodeTrackerI18n.tr("파일 병합 분석 중 오류가 발생했습니다.", "Error loading merged file analysis.")
+                    )
+                }
+            }
+        }
+    }
+
+    private fun displayMergedFileDetail(merged: MergedFileAnalysisDetail) {
+        selectedDetail = null
+        selectedMergedDetail = merged
+        selectedCommit = merged.commitSections.firstOrNull()?.commit
+        rationalePane.text = RationaleHtmlRenderer.renderMergedFileDetail(merged)
+        rationalePane.caretPosition = 0
+        rebuildPointerTreeForMergedFile(merged)
+    }
+
+    private fun rebuildPointerTreeForMergedFile(merged: MergedFileAnalysisDetail) {
+        pointerRoot.removeAllChildren()
+        for (sec in merged.commitSections) {
+            val commitGroupNode = DefaultMutableTreeNode(MergedCommitGroupNodeData(sec.commit, sec.fileDetail))
+            val fd = sec.fileDetail
+            when {
+                fd.skippedLargeOrBinary -> {
+                    commitGroupNode.add(DefaultMutableTreeNode(fd.skipReason ?: CodeTrackerI18n.defaultSkipText()))
+                }
+                fd.onlyImportOrWhitespaceChanges -> {
+                    commitGroupNode.add(DefaultMutableTreeNode(CodeTrackerI18n.importWhitespaceOnlyText()))
+                }
+                else -> {
+                    for (hunk in fd.hunks) {
+                        commitGroupNode.add(DefaultMutableTreeNode(HunkNodeData(fd, hunk, overrideCommit = sec.commit)))
+                    }
+                }
+            }
+            pointerRoot.add(commitGroupNode)
+        }
+        pointerModel.reload()
+        var row = 0
+        while (row < pointerTree.rowCount) {
+            pointerTree.expandRow(row)
+            row++
+        }
     }
 
     private fun rebuildTimelineTree(episodes: List<WorkEpisode>) {
@@ -1110,6 +1369,7 @@ class CodeTrackerPanel(
     }
 
     private fun displayCommitDetail(detail: CommitDetail) {
+        selectedMergedDetail = null
         selectedDetail = detail
         rationalePane.text = RationaleHtmlRenderer.renderCommitDetail(detail)
         rationalePane.caretPosition = 0
@@ -1244,9 +1504,13 @@ class CodeTrackerPanel(
         }
     }
 
-    private fun navigateToFileOrHunk(fileDetail: FileDiffDetail, pointer: CodeHunkPointer?) {
+    private fun navigateToFileOrHunk(
+        fileDetail: FileDiffDetail,
+        pointer: CodeHunkPointer?,
+        overrideCommit: CommitSummary? = null
+    ) {
         val result = currentResult ?: return
-        val commit = selectedCommit ?: return
+        val commit = overrideCommit ?: selectedCommit ?: return
         CodeNavigator.navigateToPointer(
             project = project,
             repoRootPath = result.filter.repo.rootPath,
@@ -1258,15 +1522,22 @@ class CodeTrackerPanel(
 
     private fun openDiffForSelectedPointerNode() {
         val node = pointerTree.lastSelectedPathComponent as? DefaultMutableTreeNode
-        val (fileDetail, pointer) = when (val obj = node?.userObject) {
-            is FileNodeData -> obj.fileDetail to obj.fileDetail.hunks.firstOrNull()
-            is HunkNodeData -> obj.fileDetail to obj.pointer
-            is PointerMdNoteNodeData -> obj.fileDetail to obj.pointer
+        val triple: Triple<FileDiffDetail?, CodeHunkPointer?, CommitSummary?> = when (val obj = node?.userObject) {
+            is FileNodeData -> Triple(obj.fileDetail, obj.fileDetail.hunks.firstOrNull(), obj.overrideCommit)
+            is MergedCommitGroupNodeData -> Triple(obj.fileDetail, obj.fileDetail.hunks.firstOrNull(), obj.commit)
+            is HunkNodeData -> Triple(obj.fileDetail, obj.pointer, obj.overrideCommit)
+            is PointerMdNoteNodeData -> Triple(obj.fileDetail, obj.pointer, obj.overrideCommit)
             else -> {
-                val first = selectedDetail?.fileDetails?.firstOrNull()
-                first to first?.hunks?.firstOrNull()
+                val firstMerged = selectedMergedDetail?.commitSections?.firstOrNull()
+                if (firstMerged != null) {
+                    Triple(firstMerged.fileDetail, firstMerged.fileDetail.hunks.firstOrNull(), firstMerged.commit)
+                } else {
+                    val first = selectedDetail?.fileDetails?.firstOrNull()
+                    Triple(first, first?.hunks?.firstOrNull(), null)
+                }
             }
         }
+        val fileDetail = triple.first
         if (fileDetail == null) {
             Messages.showInfoMessage(
                 project,
@@ -1275,12 +1546,16 @@ class CodeTrackerPanel(
             )
             return
         }
-        openDiff(fileDetail, pointer)
+        openDiff(fileDetail, triple.second, triple.third)
     }
 
-    private fun openDiff(fileDetail: FileDiffDetail, targetPointer: CodeHunkPointer? = null) {
+    private fun openDiff(
+        fileDetail: FileDiffDetail,
+        targetPointer: CodeHunkPointer? = null,
+        overrideCommit: CommitSummary? = null
+    ) {
         val result = currentResult ?: return
-        val commit = selectedCommit ?: return
+        val commit = overrideCommit ?: selectedCommit ?: return
         CodeNavigator.showCommitFileDiff(
             project = project,
             repoRootPath = result.filter.repo.rootPath,
@@ -1441,6 +1716,41 @@ class CodeTrackerPanel(
         }
     }
 
+    // Custom renderer for 5-Stage Execution Flow Tree
+    private inner class ExecutionFlowTreeCellRenderer : ColoredTreeCellRenderer() {
+        override fun customizeCellRenderer(
+            tree: JTree,
+            value: Any?,
+            selected: Boolean,
+            expanded: Boolean,
+            leaf: Boolean,
+            row: Int,
+            hasFocus: Boolean
+        ) {
+            val node = value as? DefaultMutableTreeNode ?: return
+            when (val obj = node.userObject) {
+                is FlowStageNodeData -> {
+                    icon = AllIcons.Nodes.Module
+                    append(obj.group.stage.localizedTitle(), SimpleTextAttributes.REGULAR_BOLD_ATTRIBUTES)
+                    append(" (${CodeTrackerI18n.filesCountUnit(obj.group.files.size)})", SimpleTextAttributes.GRAYED_ATTRIBUTES)
+                }
+
+                is FlowMergedFileNodeData -> {
+                    val mf = obj.mergedFile
+                    icon = AllIcons.FileTypes.Any_type
+                    append(mf.fileName, SimpleTextAttributes.REGULAR_BOLD_ATTRIBUTES)
+                    append(
+                        "  ${CodeTrackerI18n.flowModifiedBadge(mf.modifyCount, mf.totalAddedLines, mf.totalDeletedLines)}",
+                        SimpleTextAttributes(SimpleTextAttributes.STYLE_BOLD, JBColor(Color(0x0E7490), Color(0x67E8F9)))
+                    )
+                    append("  ${mf.path}", SimpleTextAttributes.GRAY_ITALIC_ATTRIBUTES)
+                }
+
+                else -> append(obj?.toString().orEmpty())
+            }
+        }
+    }
+
     // Custom renderer for Right Bottom Smart Pointer Tree
     private inner class PointerTreeCellRenderer : ColoredTreeCellRenderer() {
         override fun customizeCellRenderer(
@@ -1459,6 +1769,15 @@ class CodeTrackerPanel(
                     icon = AllIcons.Nodes.Module
                     append(obj.layer.badgeText, SimpleTextAttributes.REGULAR_BOLD_ATTRIBUTES)
                     append(" (${CodeTrackerI18n.filesCountUnit(obj.fileCount)})", SimpleTextAttributes.GRAYED_ATTRIBUTES)
+                }
+
+                is MergedCommitGroupNodeData -> {
+                    val c = obj.commit
+                    val fd = obj.fileDetail
+                    icon = AllIcons.Vcs.CommitNode
+                    append("[${c.shortHash}] ", SimpleTextAttributes(SimpleTextAttributes.STYLE_BOLD, JBColor(Color(0x1D5FD6), Color(0x6B9BFA))))
+                    append(c.subject, SimpleTextAttributes.REGULAR_BOLD_ATTRIBUTES)
+                    append("  (${c.authorName}, +${fd.addedLinesTotal}/-${fd.deletedLinesTotal})", SimpleTextAttributes.GRAYED_ATTRIBUTES)
                 }
 
                 is FileNodeData -> {
@@ -1480,6 +1799,14 @@ class CodeTrackerPanel(
                 is HunkNodeData -> {
                     val p = obj.pointer
                     icon = AllIcons.Nodes.Method
+                    p.highestRadarSeverity?.let { sev ->
+                        val color = if (sev == RadarSeverity.HIGH) {
+                            JBColor(Color(0xC62828), Color(0xFF7B72))
+                        } else {
+                            JBColor(Color(0xC25E00), Color(0xFFB74D))
+                        }
+                        append("${sev.localizedBadge()} ", SimpleTextAttributes(SimpleTextAttributes.STYLE_BOLD, color))
+                    }
                     append(
                         "📍 Line ${p.newStartLine} : ",
                         SimpleTextAttributes(SimpleTextAttributes.STYLE_BOLD, JBColor(Color(0x1D5FD6), Color(0x6B9BFA)))

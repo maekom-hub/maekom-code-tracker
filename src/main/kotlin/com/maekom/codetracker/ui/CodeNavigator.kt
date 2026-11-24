@@ -36,6 +36,27 @@ object CodeNavigator {
 
     private const val SNIPPET_SEARCH_WINDOW = 50
 
+    fun navigateToAbsoluteFileLine(
+        project: Project,
+        absoluteFilePath: String,
+        lineNumber1Based: Int
+    ) {
+        val vf = LocalFileSystem.getInstance().refreshAndFindFileByPath(absoluteFilePath)
+        if (vf == null || !vf.exists() || vf.isDirectory) {
+            Messages.showInfoMessage(
+                project,
+                CodeTrackerI18n.tr(
+                    "대상 파일 '$absoluteFilePath'을(를) 찾을 수 없습니다.",
+                    "Target file '$absoluteFilePath' could not be found."
+                ),
+                "Maekom Code Tracker"
+            )
+            return
+        }
+        val zeroBasedLine = (lineNumber1Based - 1).coerceAtLeast(0)
+        OpenFileDescriptor(project, vf, zeroBasedLine, 0).navigate(true)
+    }
+
     fun navigateToPointer(
         project: Project,
         repoRootPath: String,

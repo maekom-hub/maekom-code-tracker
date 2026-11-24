@@ -6,9 +6,15 @@ import com.maekom.codetracker.i18n.CodeTrackerI18n
 import com.maekom.codetracker.model.CheckBadge
 import com.maekom.codetracker.model.CommitDetail
 import com.maekom.codetracker.model.CommitSummary
+import com.maekom.codetracker.model.EntrypointTarget
+import com.maekom.codetracker.model.EntrypointTraceResult
 import com.maekom.codetracker.model.FileDiffDetail
 import com.maekom.codetracker.model.FileHistoryCommitEntry
+import com.maekom.codetracker.model.FlowMergedFile
+import com.maekom.codetracker.model.MergedFileAnalysisDetail
+import com.maekom.codetracker.model.MergedFileCommitSection
 import com.maekom.codetracker.model.PrimaryLayer
+import com.maekom.codetracker.model.SideEffectAlert
 import com.maekom.codetracker.model.StackTag
 import com.maekom.codetracker.model.WorkEpisode
 
@@ -51,35 +57,119 @@ object RationaleAndCheckEngine {
             fileDetails = fileDetails,
             loadedSections = loadedMdSections
         )
-        val enrichedFileDetails = MarkdownContextMatcher.attachHunkMarkdownNotes(
+        val enrichedWithMd = MarkdownContextMatcher.attachHunkMarkdownNotes(
             fileDetails = fileDetails,
             loadedSections = loadedMdSections
         )
 
+        // 2b. Side-Effect Risk Radar (cross-analyzes diff hunks + Java PSI context, skips src/test/)
+        val (radarEnrichedFiles, sideEffectAlerts) = SideEffectRadarAnalyzer.analyzeFiles(
+            project = project,
+            repoRootPath = repoRootPath,
+            fileDetails = enrichedWithMd,
+            commitHash = commit.hash
+        )
+
+        // 2c. PSI Entrypoint Impact Tracing (API / Batch / Scheduler / Listener)
+        val entrypointTrace = EntrypointImpactTracer.traceCommitEntrypoints(
+            project = project,
+            repoRootPath = repoRootPath,
+            commitHash = commit.hash,
+            fileDetails = radarEnrichedFiles
+        )
+
         // 3. Collect newly added comments & API hints
-        val addedComments = enrichedFileDetails.flatMap { fd ->
+        val addedComments = radarEnrichedFiles.flatMap { fd ->
             fd.addedComments.map { comment -> fd.summary.fileName to comment }
         }.take(30)
 
-        val apiHints = enrichedFileDetails.flatMap { it.apiHints }
-        val allStackTags = enrichedFileDetails.flatMap { it.stackTags }.toCollection(linkedSetOf())
+        val apiHints = radarEnrichedFiles.flatMap { it.apiHints }
+        val allStackTags = radarEnrichedFiles.flatMap { it.stackTags }.toCollection(linkedSetOf())
 
         // 4. Detect architecture check badges
-        val badges = detectCheckBadges(enrichedFileDetails, allStackTags)
+        val badges = detectCheckBadges(radarEnrichedFiles, allStackTags)
 
         // 5. Build 1-line cross-layer flow summary
-        val flowSummary = buildCrossLayerFlowSummary(commit, enrichedFileDetails, allStackTags)
+        val flowSummary = buildCrossLayerFlowSummary(commit, radarEnrichedFiles, allStackTags)
 
         return CommitDetail(
             summary = commit,
-            fileDetails = enrichedFileDetails,
+            fileDetails = radarEnrichedFiles,
             issueTags = issueTags,
             allStackTags = allStackTags,
             checkBadges = badges,
             crossLayerFlowSummary = flowSummary,
             matchedMarkdownSections = matchedMd,
             apiHints = apiHints,
-            addedComments = addedComments
+            addedComments = addedComments,
+            entrypointTrace = entrypointTrace,
+            sideEffectAlerts = sideEffectAlerts
+        )
+    }
+
+    /**
+     * On-demand aggregated analysis for a merged file node in the 5-stage Execution Flow View.
+     * Loads up to the 10 most recent commits touching [mergedFile] and combines hunks,
+     * entrypoints, and side-effect alerts cleanly.
+     */
+    fun analyzeMergedFlowFile(
+        project: Project,
+        repoRootPath: String,
+        mergedFile: FlowMergedFile
+    ): MergedFileAnalysisDetail {
+        val sections = mutableListOf<MergedFileCommitSection>()
+        val combinedAlerts = mutableListOf<SideEffectAlert>()
+        val combinedEntrypoints = linkedMapOf<String, EntrypointTarget>()
+        var isDumbMode = false
+        var truncated = false
+
+        for (commit in mergedFile.commits.take(10)) {
+            val fileSummary = commit.files.firstOrNull { it.path == mergedFile.path } ?: continue
+            val rawDiff = runCatching {
+                GitRepositoryService.fetchSingleFileShowDiff(project, repoRootPath, commit.hash, fileSummary.path)
+            }.getOrDefault("")
+            val parsed = UnifiedDiffParser.parseDiff(rawDiff, listOf(fileSummary))
+            val (radarFiles, alerts) = SideEffectRadarAnalyzer.analyzeFiles(
+                project = project,
+                repoRootPath = repoRootPath,
+                fileDetails = parsed,
+                commitHash = commit.hash
+            )
+            val fd = radarFiles.firstOrNull() ?: continue
+            sections.add(MergedFileCommitSection(commit = commit, fileDetail = fd))
+            combinedAlerts.addAll(alerts)
+
+            val epRes = EntrypointImpactTracer.traceCommitEntrypoints(
+                project = project,
+                repoRootPath = repoRootPath,
+                commitHash = commit.hash,
+                fileDetails = listOf(fd)
+            )
+            if (epRes.isDumbMode) isDumbMode = true
+            if (epRes.truncatedByLimit) truncated = true
+            for (ep in epRes.entrypoints) {
+                val key = "${ep.kind}|${ep.displayLabel}|${ep.filePath}|${ep.lineNumber1Based}"
+                combinedEntrypoints.putIfAbsent(key, ep)
+            }
+        }
+
+        val allFileDetails = sections.map { it.fileDetail }
+        val allStackTags = allFileDetails.flatMap { it.stackTags }.toCollection(linkedSetOf())
+        val checkBadges = detectCheckBadges(allFileDetails, allStackTags)
+
+        return MergedFileAnalysisDetail(
+            mergedFile = mergedFile,
+            commitSections = sections,
+            entrypointTrace = EntrypointTraceResult(
+                entrypoints = combinedEntrypoints.values.toList(),
+                isDumbMode = isDumbMode,
+                truncatedByLimit = truncated
+            ),
+            sideEffectAlerts = combinedAlerts
+                .distinctBy { "${it.rule}|${it.filePath}|${it.hunkPointer.newStartLine}|${it.detailKo}" }
+                .sortedWith(compareBy<SideEffectAlert> { it.severity.ordinal }.thenBy { it.hunkPointer.newStartLine }),
+            allStackTags = allStackTags,
+            checkBadges = checkBadges
         )
     }
 
@@ -99,7 +189,19 @@ object RationaleAndCheckEngine {
             commitHash = entry.commit.hash,
             pathAtCommit = entry.pathAtCommit
         )
-        val fileDetails = UnifiedDiffParser.parseDiff(rawDiff, listOf(fileSummary))
+        val parsedDetails = UnifiedDiffParser.parseDiff(rawDiff, listOf(fileSummary))
+        val (fileDetails, sideEffectAlerts) = SideEffectRadarAnalyzer.analyzeFiles(
+            project = project,
+            repoRootPath = repoRootPath,
+            fileDetails = parsedDetails,
+            commitHash = entry.commit.hash
+        )
+        val entrypointTrace = EntrypointImpactTracer.traceCommitEntrypoints(
+            project = project,
+            repoRootPath = repoRootPath,
+            commitHash = entry.commit.hash,
+            fileDetails = fileDetails
+        )
         val issueTags = extractIssueTags("${entry.commit.subject}\n${entry.commit.body}")
         val addedComments = fileDetails.flatMap { fd ->
             fd.addedComments.map { comment -> fd.summary.fileName to comment }
@@ -118,7 +220,9 @@ object RationaleAndCheckEngine {
             crossLayerFlowSummary = flowSummary,
             matchedMarkdownSections = emptyList(),
             apiHints = apiHints,
-            addedComments = addedComments
+            addedComments = addedComments,
+            entrypointTrace = entrypointTrace,
+            sideEffectAlerts = sideEffectAlerts
         )
     }
 

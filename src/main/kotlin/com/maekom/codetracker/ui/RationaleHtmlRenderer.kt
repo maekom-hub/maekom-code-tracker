@@ -8,18 +8,24 @@ import com.maekom.codetracker.i18n.CodeTrackerI18n
 import com.maekom.codetracker.model.BadgeSeverity
 import com.maekom.codetracker.model.CommitDetail
 import com.maekom.codetracker.model.CommitSummary
+import com.maekom.codetracker.model.EntrypointTraceResult
+import com.maekom.codetracker.model.MergedFileAnalysisDetail
+import com.maekom.codetracker.model.RadarSeverity
+import com.maekom.codetracker.model.SideEffectAlert
 import java.awt.Color
 import java.time.format.DateTimeFormatter
 import javax.swing.UIManager
 
 /**
  * Generates clean, theme-aware local HTML for the Right-Top
- * [Change Reason & Architecture Check] panel. Dynamically honors current KO/EN language
- * with Tree/Label base font sizing (12px body, 13px bold title) and zero external links.
+ * [Change Reason & Architecture Check] panel.
+ * Supports clickable local links (`ep:<idx>` for Impacted Entrypoints, `radar:<idx>` for Side-Effect Radar),
+ * zero-restart KO/EN localization, and Tree/Label compact font sizing (12px body, 13px bold title).
  */
 object RationaleHtmlRenderer {
 
     private val DT_FMT = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss")
+    private val SHORT_DT_FMT = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm")
 
     private fun baseFontFamily(): String {
         val treeFont = UIManager.getFont("Tree.font") ?: JBUI.Fonts.label()
@@ -30,12 +36,14 @@ object RationaleHtmlRenderer {
         val fontFamily = baseFontFamily()
         val fg = toHex(UIUtil.getLabelForeground())
         val bg = toHex(UIUtil.getPanelBackground())
+        val accentBlue = toHex(JBColor(Color(0x1D5FD6), Color(0x6B9BFA)))
         return """
             <style>
                 body { font-family: '$fontFamily', sans-serif; font-size: 12px; color: $fg; background-color: $bg; margin: 6px; }
                 .title { font-size: 13px; font-weight: bold; }
                 .meta { font-size: 11px; }
                 .sec-label { font-size: 11px; font-weight: bold; margin-bottom: 2px; }
+                a { color: $accentBlue; text-decoration: none; }
                 code { font-size: 11px; }
                 ul { margin: 2px 0 2px 15px; padding: 0; }
                 li { margin-bottom: 1px; }
@@ -71,7 +79,6 @@ object RationaleHtmlRenderer {
         val accentBlue = toHex(JBColor(Color(0x1D5FD6), Color(0x6B9BFA)))
         val flowBg = toHex(JBColor(Color(0xEBF3FF), Color(0x243347)))
 
-        // Recompute cross-layer flow summary dynamically for instant KO/EN hot-reload on cached CommitDetail
         val localizedFlowSummary = RationaleAndCheckEngine.buildCrossLayerFlowSummary(
             detail.summary,
             detail.fileDetails,
@@ -101,12 +108,18 @@ object RationaleHtmlRenderer {
             }
             append("</div>")
 
-            // 5) Cross-layer flow summary (slim padding)
+            // Top Section A: Impacted Entrypoints (PSI call-graph upward trace, clickable chips)
+            appendEntrypointsSection(detail.entrypointTrace, muted, cardBg, borderColor, accentBlue)
+
+            // Top Section B: Backend Side-Effect Risk Radar (clickable jump to exact hunk line)
+            appendSideEffectRadarSection(detail.sideEffectAlerts, fg, muted)
+
+            // Cross-layer flow summary
             append("<div style=\"background-color: $flowBg; border-left: 3px solid $accentBlue; padding: 3px 6px; margin-bottom: 5px;\">")
             append("<b>${escapeHtml(localizedFlowSummary)}</b>")
             append("</div>")
 
-            // 4) Architecture check point badges (slim padding)
+            // Architecture check point badges
             if (detail.checkBadges.isNotEmpty()) {
                 append("<div style=\"margin-bottom: 5px;\">")
                 append("<div class=\"sec-label\" style=\"color: $muted;\">${escapeHtml(CodeTrackerI18n.tr("현업 아키텍처 체킹 포인트", "Architecture Check Points"))}</div>")
@@ -123,7 +136,7 @@ object RationaleHtmlRenderer {
                 append("</div>")
             }
 
-            // 1) Commit Body
+            // Commit Body
             if (c.body.isNotBlank() && c.body.trim() != c.subject.trim()) {
                 append("<div style=\"margin-bottom: 5px;\">")
                 append("<div class=\"sec-label\" style=\"color: $muted;\">${escapeHtml(CodeTrackerI18n.tr("커밋 메시지 본문", "Commit Message Body"))}</div>")
@@ -132,7 +145,7 @@ object RationaleHtmlRenderer {
                 append("</div></div>")
             }
 
-            // 2) Matched Markdown (.md) context
+            // Matched Markdown (.md) context
             if (detail.matchedMarkdownSections.isNotEmpty()) {
                 append("<div style=\"margin-bottom: 5px;\">")
                 append("<div class=\"sec-label\" style=\"color: $muted;\">${escapeHtml(CodeTrackerI18n.tr("연관 문서(.md) 맥락 인용", "Related Markdown (.md) Context"))}</div>")
@@ -180,7 +193,7 @@ object RationaleHtmlRenderer {
                 append("</div></div>")
             }
 
-            // 3) Newly added comments
+            // Newly added comments
             if (detail.addedComments.isNotEmpty()) {
                 append("<div style=\"margin-bottom: 4px;\">")
                 append("<div class=\"sec-label\" style=\"color: $muted;\">${escapeHtml(CodeTrackerI18n.tr("새로 추가된 코드 주석 (+)", "Newly Added Code Comments (+)"))}</div>")
@@ -193,6 +206,123 @@ object RationaleHtmlRenderer {
 
             append("</body></html>")
         }
+    }
+
+    fun renderMergedFileDetail(merged: MergedFileAnalysisDetail): String {
+        val mf = merged.mergedFile
+        val fg = toHex(UIUtil.getLabelForeground())
+        val muted = toHex(UIUtil.getContextHelpForeground())
+        val cardBg = toHex(JBColor(Color(0xF5F7FA), Color(0x2B2D30)))
+        val borderColor = toHex(JBColor(Color(0xD8DEE9), Color(0x43454A)))
+        val accentBlue = toHex(JBColor(Color(0x1D5FD6), Color(0x6B9BFA)))
+        val flowBg = toHex(JBColor(Color(0xEBF3FF), Color(0x243347)))
+
+        return buildString {
+            append("<html><head>${commonStyleBlock()}</head><body>")
+
+            append("<div class=\"title\" style=\"margin-bottom: 3px;\">${escapeHtml(mf.fileName)}</div>")
+            append("<div class=\"meta\" style=\"color: $muted; margin-bottom: 5px;\">")
+            append("${escapeHtml(mf.path)} &nbsp;|&nbsp; ${escapeHtml(CodeTrackerI18n.flowModifiedBadge(mf.modifyCount, mf.totalAddedLines, mf.totalDeletedLines))}")
+            append("</div>")
+
+            append("<div style=\"background-color: $flowBg; border-left: 3px solid $accentBlue; padding: 3px 6px; margin-bottom: 5px;\">")
+            append("<b>${escapeHtml(mf.stage.localizedTitle())}</b>")
+            if (merged.allStackTags.isNotEmpty()) {
+                append(" &nbsp;&raquo;&nbsp; ${escapeHtml(merged.allStackTags.joinToString(", ") { it.label })}")
+            }
+            append("</div>")
+
+            appendEntrypointsSection(merged.entrypointTrace, muted, cardBg, borderColor, accentBlue)
+            appendSideEffectRadarSection(merged.sideEffectAlerts, fg, muted)
+
+            // Related commits timeline for this merged file
+            append("<div style=\"margin-bottom: 5px;\">")
+            append("<div class=\"sec-label\" style=\"color: $muted;\">${escapeHtml(CodeTrackerI18n.flowMergedHeader(mf.fileName, merged.commitSections.size))}</div>")
+            for (sec in merged.commitSections) {
+                val c = sec.commit
+                val fd = sec.fileDetail
+                append("<div style=\"background-color: $cardBg; border: 1px solid $borderColor; padding: 4px 6px; margin-bottom: 3px;\">")
+                append("<div><span style=\"color: $accentBlue;\"><b>[${escapeHtml(c.shortHash)}]</b></span> <b>${escapeHtml(c.subject)}</b></div>")
+                append("<div class=\"meta\" style=\"color: $muted;\">${escapeHtml(c.authorName)} &nbsp;|&nbsp; ${c.timestamp.format(SHORT_DT_FMT)} &nbsp;|&nbsp; ${escapeHtml(fd.summary.status.localizedLabel())} (+${fd.addedLinesTotal}/-${fd.deletedLinesTotal})</div>")
+                if (c.body.isNotBlank() && c.body.trim() != c.subject.trim()) {
+                    append("<div style=\"margin-top: 2px;\">${escapeHtml(c.body.trim().take(240)).replace("\n", "<br/>")}</div>")
+                }
+                append("</div>")
+            }
+            append("</div>")
+
+            append("</body></html>")
+        }
+    }
+
+    private fun StringBuilder.appendEntrypointsSection(
+        trace: EntrypointTraceResult,
+        muted: String,
+        cardBg: String,
+        borderColor: String,
+        accentBlue: String
+    ) {
+        if (!trace.isDumbMode && trace.entrypoints.isEmpty()) return
+
+        append("<div style=\"margin-bottom: 5px;\">")
+        append("<div class=\"sec-label\" style=\"color: $muted;\">${escapeHtml(CodeTrackerI18n.impactedEntrypointsTitle())}")
+        if (trace.truncatedByLimit) {
+            append(" <span style=\"font-weight: normal;\">${escapeHtml(CodeTrackerI18n.entrypointTruncatedHint())}</span>")
+        }
+        append("</div>")
+
+        if (trace.isDumbMode) {
+            append("<div style=\"background-color: $cardBg; border: 1px solid $borderColor; padding: 3px 6px; color: $muted;\">")
+            append(escapeHtml(CodeTrackerI18n.entrypointDumbModeNotice()))
+            append("</div>")
+        } else {
+            val chipBg = toHex(JBColor(Color(0xEAF2FF), Color(0x23344D)))
+            val chipBorder = toHex(JBColor(Color(0xB8D0F8), Color(0x3C5A82)))
+            append("<div style=\"line-height: 1.8;\">")
+            trace.entrypoints.forEachIndexed { idx, ep ->
+                val depthSuffix = if (ep.hopDepth > 0) " (${ep.hopDepth} hop)" else ""
+                append(
+                    "<a href=\"ep:$idx\" style=\"background-color: $chipBg; border: 1px solid $chipBorder; " +
+                        "color: $accentBlue; padding: 1px 5px; margin-right: 4px;\">" +
+                        "<b>${escapeHtml(ep.displayLabel)}</b>${escapeHtml(depthSuffix)}</a> "
+                )
+            }
+            append("</div>")
+        }
+        append("</div>")
+    }
+
+    private fun StringBuilder.appendSideEffectRadarSection(
+        alerts: List<SideEffectAlert>,
+        fg: String,
+        muted: String
+    ) {
+        if (alerts.isEmpty()) return
+
+        append("<div style=\"margin-bottom: 5px;\">")
+        append("<div class=\"sec-label\" style=\"color: $muted;\">${escapeHtml(CodeTrackerI18n.sideEffectRadarTitle())}</div>")
+        alerts.forEachIndexed { idx, alert ->
+            val (bgHex, badgeFgHex, borderHex) = when (alert.severity) {
+                RadarSeverity.HIGH -> Triple(
+                    toHex(JBColor(Color(0xFDECEC), Color(0x4A2222))),
+                    toHex(JBColor(Color(0xC62828), Color(0xFF7B72))),
+                    toHex(JBColor(Color(0xF5B5B5), Color(0x7A3333)))
+                )
+                RadarSeverity.WARN -> Triple(
+                    toHex(JBColor(Color(0xFFF4E5), Color(0x47361C))),
+                    toHex(JBColor(Color(0xC25E00), Color(0xFFB74D))),
+                    toHex(JBColor(Color(0xF5D099), Color(0x7A5A28)))
+                )
+            }
+            append("<div style=\"background-color: $bgHex; border-left: 3px solid $borderHex; padding: 2px 5px; margin-bottom: 2px;\">")
+            append("<a href=\"radar:$idx\" style=\"color: $fg;\">")
+            append("<span style=\"color: $badgeFgHex; font-weight: bold;\">${escapeHtml(alert.severity.localizedBadge())}</span> ")
+            append("<b>${escapeHtml(alert.rule.localizedTitle())}</b> ")
+            append("<span class=\"meta\" style=\"color: $muted;\">(${escapeHtml(alert.fileName)}:${alert.hunkPointer.newStartLine})</span>")
+            append(" — ${escapeHtml(alert.localizedDetail())}")
+            append("</a></div>")
+        }
+        append("</div>")
     }
 
     private fun escapeHtml(text: String): String {

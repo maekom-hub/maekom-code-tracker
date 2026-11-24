@@ -254,4 +254,71 @@ object CodeTrackerI18n {
         "업데이트 확인 중 오류가 발생했습니다: $detail",
         "An error occurred while checking for updates: $detail"
     )
+
+    // ---- v0.2.0: Left Panel View Mode Toggle & 5-Stage Execution Flow ----
+    fun viewModeTimeline(): String = tr("커밋/에피소드 타임라인", "Commit/Episode Timeline")
+    fun viewModeExecutionFlow(): String = tr("실행 흐름도 재조립", "Execution Flow View")
+    fun flowStage1(): String = tr(
+        "1단계: 진입점 (Controller / Batch / Scheduler / Listener)",
+        "Stage 1: Entrypoints (Controller / Batch / Scheduler / Listener)"
+    )
+    fun flowStage2(): String = tr(
+        "2단계: 비즈니스 로직 (Service / Facade / Component)",
+        "Stage 2: Business Logic (Service / Facade / Component)"
+    )
+    fun flowStage3(): String = tr(
+        "3단계: 데이터 영속성 (Repository / JPA Entity / MyBatis Mapper & XML / QueryDSL)",
+        "Stage 3: Data Persistence (Repository / JPA Entity / MyBatis Mapper & XML / QueryDSL)"
+    )
+    fun flowStage4(): String = tr(
+        "4단계: 외부 시스템 연동 (FeignClient / WebClient / RestTemplate / Kafka / RabbitMQ / 외부 모듈)",
+        "Stage 4: External Integration (FeignClient / WebClient / RestTemplate / Kafka / RabbitMQ / External)"
+    )
+    fun flowStage5(): String = tr(
+        "5단계: 스키마·설정·모델 (DTO / VO / Config / application*.yml / SQL)",
+        "Stage 5: Schema, Config & Model (DTO / VO / Config / application*.yml / SQL)"
+    )
+    fun flowModifiedBadge(count: Int, added: Int, deleted: Int): String = tr(
+        "${count}회 수정 (+$added/-$deleted)",
+        "$count edits (+$added/-$deleted)"
+    )
+    fun flowEmptyText(): String = tr(
+        "실행 흐름도에 표시할 변경 파일이 없습니다.",
+        "No modified files to assemble into execution flow."
+    )
+    fun flowLoadingMergedFile(fileName: String, commitCount: Int): String = tr(
+        "'$fileName' 관련 ${commitCount}개 커밋의 변경 이력, 엔트리포인트, 위험 레이더를 병합 분석 중입니다...",
+        "Aggregating Diff hunks, entrypoints, and risk radar across $commitCount commits for '$fileName'..."
+    )
+    fun flowMergedHeader(filePath: String, commitCount: Int): String = tr(
+        "실행 흐름 병합 분석: $filePath (관련 커밋 ${commitCount}건)",
+        "Merged Execution Flow Analysis: $filePath ($commitCount related commits)"
+    )
+
+    // ---- v0.2.0: Entrypoint Impact Tracer ----
+    fun impactedEntrypointsTitle(): String = tr("영향받는 엔트리포인트 (클릭: 코드 점프)", "Impacted Entrypoints (Click to Jump)")
+    fun entrypointDumbModeNotice(): String = tr(
+        "IDE 인덱싱 진행 중(Dumb Mode)이어서 PSI 엔트리포인트 역추적을 생략했습니다. 인덱싱 완료 후 커밋을 다시 선택해 주세요.",
+        "IDE indexing is in progress (Dumb Mode). Reselect the commit after indexing completes to trace PSI entrypoints."
+    )
+    fun entrypointNoneFound(): String = tr(
+        "호출 그래프 상 연결된 Web API / Batch / 스케줄러 진입점이 탐지되지 않았습니다.",
+        "No linked Web API, Batch, or Scheduler entrypoints detected in call graph."
+    )
+    fun entrypointTruncatedHint(): String = tr(
+        "(탐색 한도 도달: 최대 6단계 / 150개 메서드)",
+        "(Search limit reached: max depth 6 / 150 methods)"
+    )
+
+    // ---- v0.2.0: Side-Effect Risk Radar ----
+    fun sideEffectRadarTitle(): String = tr(
+        "백엔드 장애 위험 레이더 (클릭: 해당 라인 이동)",
+        "Backend Side-Effect Risk Radar (Click to Jump)"
+    )
+    fun radarBadgeHigh(): String = tr("[위험 HIGH]", "[HIGH RISK]")
+    fun radarBadgeWarn(): String = tr("[주의 WARN]", "[WARN]")
+    fun radarRuleTxBoundary(): String = tr("트랜잭션 경계 변경", "Transaction Boundary Changed")
+    fun radarRuleTxSelfInvocation(): String = tr("트랜잭션 자기 호출(Self-Invocation)", "Transaction Self-Invocation")
+    fun radarRuleMyBatisBulk(): String = tr("MyBatis/DB 전체 갱신·삭제 위험", "MyBatis/DB Bulk Update/Delete Risk")
+    fun radarRuleExternalSpec(): String = tr("외부 연동 및 스펙 파괴 위험", "External Integration / Spec Breaking Risk")
 }

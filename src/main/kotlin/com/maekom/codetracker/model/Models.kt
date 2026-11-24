@@ -164,7 +164,9 @@ data class FileSummary(
     val path: String,
     val oldPath: String? = null,
     val status: FileChangeStatus,
-    val primaryLayer: PrimaryLayer
+    val primaryLayer: PrimaryLayer,
+    val addedLines: Int = 0,
+    val deletedLines: Int = 0
 ) {
     val fileName: String
         get() = path.substringAfterLast('/')
@@ -219,6 +221,112 @@ data class MarkdownSection(
     val score: Int
 )
 
+enum class EntrypointKind(val badge: String) {
+    API("[API]"),
+    BATCH("[BATCH]"),
+    SCHEDULER("[SCHED]"),
+    LISTENER("[EVENT]")
+}
+
+data class EntrypointTarget(
+    val kind: EntrypointKind,
+    val displayLabel: String,
+    val filePath: String,
+    val lineNumber1Based: Int,
+    val className: String,
+    val methodName: String,
+    val hopDepth: Int
+)
+
+data class EntrypointTraceResult(
+    val entrypoints: List<EntrypointTarget> = emptyList(),
+    val isDumbMode: Boolean = false,
+    val truncatedByLimit: Boolean = false
+)
+
+enum class RadarSeverity {
+    HIGH,
+    WARN;
+
+    fun localizedBadge(): String = when (this) {
+        HIGH -> CodeTrackerI18n.radarBadgeHigh()
+        WARN -> CodeTrackerI18n.radarBadgeWarn()
+    }
+}
+
+enum class SideEffectRule(val severity: RadarSeverity) {
+    TRANSACTION_BOUNDARY_CHANGE(RadarSeverity.HIGH),
+    TRANSACTION_SELF_INVOCATION(RadarSeverity.HIGH),
+    MYBATIS_BULK_UPDATE_DELETE_RISK(RadarSeverity.HIGH),
+    EXTERNAL_SPEC_OR_RESILIENCE_RISK(RadarSeverity.WARN);
+
+    fun localizedTitle(): String = when (this) {
+        TRANSACTION_BOUNDARY_CHANGE -> CodeTrackerI18n.radarRuleTxBoundary()
+        TRANSACTION_SELF_INVOCATION -> CodeTrackerI18n.radarRuleTxSelfInvocation()
+        MYBATIS_BULK_UPDATE_DELETE_RISK -> CodeTrackerI18n.radarRuleMyBatisBulk()
+        EXTERNAL_SPEC_OR_RESILIENCE_RISK -> CodeTrackerI18n.radarRuleExternalSpec()
+    }
+}
+
+data class SideEffectAlert(
+    val severity: RadarSeverity,
+    val rule: SideEffectRule,
+    val filePath: String,
+    val fileName: String,
+    val hunkPointer: CodeHunkPointer,
+    val detailKo: String,
+    val detailEn: String,
+    val commitHash: String? = null
+) {
+    fun localizedDetail(): String = CodeTrackerI18n.tr(detailKo, detailEn)
+}
+
+enum class ExecutionFlowStage(val order: Int) {
+    STAGE_1_ENTRYPOINT(1),
+    STAGE_2_BUSINESS_LOGIC(2),
+    STAGE_3_DATA_PERSISTENCE(3),
+    STAGE_4_EXTERNAL_INTEGRATION(4),
+    STAGE_5_SCHEMA_CONFIG_MODEL(5);
+
+    fun localizedTitle(): String = when (this) {
+        STAGE_1_ENTRYPOINT -> CodeTrackerI18n.flowStage1()
+        STAGE_2_BUSINESS_LOGIC -> CodeTrackerI18n.flowStage2()
+        STAGE_3_DATA_PERSISTENCE -> CodeTrackerI18n.flowStage3()
+        STAGE_4_EXTERNAL_INTEGRATION -> CodeTrackerI18n.flowStage4()
+        STAGE_5_SCHEMA_CONFIG_MODEL -> CodeTrackerI18n.flowStage5()
+    }
+}
+
+data class FlowMergedFile(
+    val path: String,
+    val fileName: String,
+    val stage: ExecutionFlowStage,
+    val primaryLayer: PrimaryLayer,
+    val modifyCount: Int,
+    val totalAddedLines: Int,
+    val totalDeletedLines: Int,
+    val commits: List<CommitSummary>
+)
+
+data class FlowStageGroup(
+    val stage: ExecutionFlowStage,
+    val files: List<FlowMergedFile>
+)
+
+data class MergedFileCommitSection(
+    val commit: CommitSummary,
+    val fileDetail: FileDiffDetail
+)
+
+data class MergedFileAnalysisDetail(
+    val mergedFile: FlowMergedFile,
+    val commitSections: List<MergedFileCommitSection>,
+    val entrypointTrace: EntrypointTraceResult,
+    val sideEffectAlerts: List<SideEffectAlert>,
+    val allStackTags: Set<StackTag>,
+    val checkBadges: List<CheckBadge>
+)
+
 data class CodeHunkPointer(
     val filePath: String,
     val newStartLine: Int,
@@ -232,7 +340,9 @@ data class CodeHunkPointer(
     val deletedLines: Int,
     val firstChangedCodeLine: String? = null,
     val matchedMdShortNote: String? = null,
-    val matchedMdFullNote: String? = null
+    val matchedMdFullNote: String? = null,
+    val rawDiffLines: List<String> = emptyList(),
+    val highestRadarSeverity: RadarSeverity? = null
 )
 
 data class ApiEndpointHint(
@@ -267,6 +377,8 @@ data class CommitDetail(
     val matchedMarkdownSections: List<MarkdownSection>,
     val apiHints: List<ApiEndpointHint>,
     val addedComments: List<Pair<String, String>>,
+    val entrypointTrace: EntrypointTraceResult = EntrypointTraceResult(),
+    val sideEffectAlerts: List<SideEffectAlert> = emptyList(),
     val analyzedAt: LocalDateTime = LocalDateTime.now()
 )
 

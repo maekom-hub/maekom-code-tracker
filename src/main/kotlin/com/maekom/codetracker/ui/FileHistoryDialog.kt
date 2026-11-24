@@ -26,6 +26,7 @@ import com.maekom.codetracker.model.FileDiffDetail
 import com.maekom.codetracker.model.FileHistoryCommitEntry
 import com.maekom.codetracker.model.FileHistoryResult
 import com.maekom.codetracker.model.FileHistoryVersionGroup
+import com.maekom.codetracker.model.RadarSeverity
 import java.awt.BorderLayout
 import java.awt.Color
 import java.awt.FlowLayout
@@ -49,6 +50,7 @@ import javax.swing.JPopupMenu
 import javax.swing.JTree
 import javax.swing.SwingUtilities
 import javax.swing.UIManager
+import javax.swing.event.HyperlinkEvent
 import javax.swing.text.html.HTMLEditorKit
 import javax.swing.tree.DefaultMutableTreeNode
 import javax.swing.tree.DefaultTreeModel
@@ -327,6 +329,25 @@ class FileHistoryDialog(
     }
 
     private fun wireListeners() {
+        // Clickable Entrypoints & Side-Effect Radar links inside rationalePane
+        rationalePane.addHyperlinkListener { e ->
+            if (e.eventType != HyperlinkEvent.EventType.ACTIVATED) return@addHyperlinkListener
+            val desc = e.description ?: return@addHyperlinkListener
+            val detail = selectedDetail ?: return@addHyperlinkListener
+            when {
+                desc.startsWith("ep:") -> {
+                    val idx = desc.removePrefix("ep:").toIntOrNull() ?: return@addHyperlinkListener
+                    val ep = detail.entrypointTrace.entrypoints.getOrNull(idx) ?: return@addHyperlinkListener
+                    CodeNavigator.navigateToAbsoluteFileLine(project, ep.filePath, ep.lineNumber1Based)
+                }
+                desc.startsWith("radar:") -> {
+                    val idx = desc.removePrefix("radar:").toIntOrNull() ?: return@addHyperlinkListener
+                    val alert = detail.sideEffectAlerts.getOrNull(idx) ?: return@addHyperlinkListener
+                    navigateToWorkspacePointer(alert.hunkPointer)
+                }
+            }
+        }
+
         historyTree.addTreeSelectionListener {
             val node = historyTree.lastSelectedPathComponent as? DefaultMutableTreeNode ?: return@addTreeSelectionListener
             when (val obj = node.userObject) {
@@ -728,6 +749,14 @@ class FileHistoryDialog(
                 is PointerHunkNodeData -> {
                     val p = obj.pointer
                     icon = AllIcons.Nodes.Method
+                    p.highestRadarSeverity?.let { sev ->
+                        val color = if (sev == RadarSeverity.HIGH) {
+                            JBColor(Color(0xC62828), Color(0xFF7B72))
+                        } else {
+                            JBColor(Color(0xC25E00), Color(0xFFB74D))
+                        }
+                        append("${sev.localizedBadge()} ", SimpleTextAttributes(SimpleTextAttributes.STYLE_BOLD, color))
+                    }
                     append(
                         "📍 Line ${p.newStartLine} : ",
                         SimpleTextAttributes(SimpleTextAttributes.STYLE_BOLD, JBColor(Color(0x1D5FD6), Color(0x6B9BFA)))
